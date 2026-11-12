@@ -1,15 +1,15 @@
 # Product plan
 
-_Working name: **Teduh** (Malay: shade, shelter). Tagline: **A showflat for every flat.**_
+_Name: **Blk**, the way every HDB address begins. Tagline: **A showflat for every flat.**_
 _Read [01-research.md](01-research.md) first; every feature below traces back to a finding there._
 
 ## 1. What it is
 
-Condo buyers get a showflat. BTO buyers get one generic show unit at HDB Hub. Resale buyers get a 15-minute viewing at 9pm. Teduh gives any HDB flat its own showflat: type a block address or drop in a floor plan, and within seconds you are standing inside a true-to-scale model of that flat, watching where the real sun falls at 5pm in June, tapping walls to see which ones HDB would let you remove, and sending the whole thing to your family chat.
+Condo buyers get a showflat. BTO buyers get one generic show unit at HDB Hub. Resale buyers get a 15-minute viewing at 9pm. Blk gives any HDB flat its own showflat: type a block address or drop in a floor plan, and within seconds you are standing inside a true-to-scale model of that flat, watching where the real sun falls at 5pm in June, tapping walls to see which ones HDB would let you remove, and sending the whole thing to your family chat.
 
 It is a web app. Nothing to install, no login, and it opens from a WhatsApp link or inside Telegram.
 
-**Positioning.** Everyone else in this space sells style: what your flat could look like. Teduh sells truth: what the flat is actually like, and what you are allowed to do with it. That is the part general AI tools get wrong, the part buyers cannot see at a viewing, and the part the regulator cares about.
+**Positioning.** Everyone else in this space sells style: what your flat could look like. Blk sells truth: what the flat is actually like, and what you are allowed to do with it. That is the part general AI tools get wrong, the part buyers cannot see at a viewing, and the part the regulator cares about.
 
 ## 2. Guardrails
 
@@ -19,7 +19,7 @@ These are the rules that keep the product from sliding into the crowd.
 2. **A model, shown as a model.** The look is an architect's maquette, never a fake photograph. It is faster on phones, it is distinctive, and it cannot be mistaken for a picture of the real unit.
 3. **Facts carry sources.** Anything about rules, lease, prices or agents links to the official page or dataset it came from. Where the app is estimating, it says "typical" and says how to confirm.
 4. **AI stays backstage.** AI reads floor plans. It does not chat, does not give advice, and does not state rules. Rules are written by hand from HDB's guidelines.
-5. **The chat app is the platform.** Sharing, replying and following up happen in WhatsApp and Telegram, where people already are. Teduh does not build its own inbox or accounts.
+5. **The chat app is the platform.** Sharing, replying and following up happen in WhatsApp and Telegram, where people already are. Blk does not build its own inbox or accounts.
 6. **Phone first.** Most opens will come from a chat link on a mid-range phone on mobile data.
 
 ## 3. Who it is for
@@ -54,7 +54,7 @@ Priority: **P0** ships in the first public version, **P1** follows, **P2** later
 | Template library | Original layouts drawn for this project, one per common flat type, model and era. Twelve templates cover about 85% of recent resale transactions. Mirror toggle, since half of all units are mirrored | P0 (4 templates), P1 (12) |
 | Orientation by tap | The block's real footprint from HDB open data; tap the facade your living room faces | P0 |
 | By floor plan | Photo, PDF or screenshot. HDB plans follow fixed drawing conventions (thick line for structural, thin for partition, dimensions in mm), so a parser can combine line detection with a vision model for labels. The user then confirms against the original, shown underneath | P1 |
-| Share into the app | On Android, forward a floor plan image from WhatsApp straight into Teduh | P2 |
+| Share into the app | On Android, forward a floor plan image from WhatsApp straight into Blk | P2 |
 
 ### Space
 
@@ -154,7 +154,7 @@ Everything in the first public version works on plain static hosting. The server
 
 ## 9. Architecture
 
-- **Front end:** SvelteKit with TypeScript, built as a static site. Three.js for the scene, written directly for control over performance. Svelte's built-in springs and transitions handle interface motion.
+- **Front end:** Vite, Svelte 5 and TypeScript, built as a static site that can also be packed into one self-contained HTML file for previews. Three.js for the scene, written directly for control over performance. Svelte's built-in springs and transitions handle interface motion.
 - **Flat format:** one JSON document in millimetres: walls (endpoints, thickness, kind), openings (wall, offset, width, sill and head heights, door swing), rooms (type, outline, finish), fixtures, and metadata (flat type, model, area, north bearing, source, confidence). Compressed into the link.
 - **Scene builder:** turns that document into geometry. Templates, uploaded plans and shared links all pass through the same path.
 - **Sun:** standard solar position maths, unit-tested against known values (noon altitude of 67.9° to the north on 21 June and 65.2° to the south on 21 December).
@@ -220,9 +220,9 @@ The assumptions in research section 9 get tested with five users each as soon as
 
 | # | Item | Recommendation | When needed |
 |---|---|---|---|
-| 1 | Name | Teduh, with "A showflat for every flat". Alternatives: Showflat, Blk | Before milestone 4 |
-| 2 | Lead audience for launch | BTO and resale buyers first; agent card as a secondary feature | Now, if you disagree |
-| 3 | Hosting | GitHub Pages to start (one setting to enable); Cloudflare when server functions are needed | End of milestone 1 |
+| 1 | Name | Decided: Blk | Done |
+| 2 | Lead audience for launch | Decided: buyers first; contact card for sellers and agents as a secondary feature | Done |
+| 3 | Hosting | Decided: GitHub Pages to start (enable Pages with source "GitHub Actions" in the repository settings); Cloudflare when server functions are needed | Setting needed now |
 | 4 | Telegram bot | Create one in BotFather and share the username | Milestone 4 |
 | 5 | API key for floor plan reading | An Anthropic API key held as a server secret | Milestone 5 |
 | 6 | Five real users | A BTO Telegram group you are in, or friends house-hunting, and one or two agents | After milestone 2 |
