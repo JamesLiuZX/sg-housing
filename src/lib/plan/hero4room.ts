@@ -108,7 +108,7 @@ export const hero4room: Plan = {
 
   lights: [
     [10850, 2100],
-    [8150, 5950],
+    [8450, 5950],
     [5300, 5600],
     [1700, 1600],
     [4850, 1600],
@@ -131,8 +131,8 @@ export const hero4room: Plan = {
     { kind: 'aircon', x: 12400, y: 1900, face: 'W' },
 
     // Dining and entrance
-    { kind: 'diningSet', x: 8150, y: 5950, face: 'E', w: 1600, d: 850, solid: true },
-    { kind: 'pendant', x: 8150, y: 5950 },
+    { kind: 'diningSet', x: 8450, y: 5950, face: 'E', w: 1600, d: 850, solid: true },
+    { kind: 'pendant', x: 8450, y: 5950 },
     { kind: 'shoeCabinet', x: 8800, y: 7620, face: 'N', w: 1000, d: 350, solid: true },
 
     // Kitchen and yard
@@ -145,7 +145,7 @@ export const hero4room: Plan = {
 
     // Master bedroom
     { kind: 'bed', x: 2200, y: 1350, face: 'W', w: 1520, d: 2000, solid: true },
-    { kind: 'sideTable', x: 3060, y: 370, face: 'W', w: 450, d: 420, solid: true },
+    { kind: 'sideTable', x: 3060, y: 318, face: 'W', w: 400, d: 420, solid: true },
     { kind: 'wardrobe', x: 2525, y: 2850, face: 'N', w: 1550, d: 600, solid: true },
     { kind: 'desk', x: 380, y: 1500, face: 'E', w: 1000, d: 520, solid: true, opts: { vanity: true } },
     { kind: 'aircon', x: 100, y: 2620, face: 'E' },
@@ -157,7 +157,7 @@ export const hero4room: Plan = {
     { kind: 'aircon', x: 4850, y: 3150, face: 'N' },
 
     // Bedroom 3, set up as a study
-    { kind: 'desk', x: 7750, y: 430, face: 'S', w: 1400, d: 650, solid: true },
+    { kind: 'desk', x: 7860, y: 430, face: 'S', w: 1200, d: 650, solid: true },
     { kind: 'sofa', x: 6790, y: 1330, face: 'E', w: 1850, d: 850, solid: true, opts: { daybed: true } },
     { kind: 'bookshelf', x: 8940, y: 1500, face: 'W', w: 1600, d: 320, solid: true },
     { kind: 'rug', x: 7800, y: 1900, w: 1300, d: 1500, opts: { tone: 1 } },
@@ -178,7 +178,7 @@ export const hero4room: Plan = {
     // Outside
     { kind: 'compressor', x: 900, y: 7150, face: 'S' },
     { kind: 'compressor', x: 2300, y: 7150, face: 'S' },
-    { kind: 'plant', x: 10900, y: 8250, w: 420, d: 420, solid: true },
+    { kind: 'plant', x: 10900, y: 8320, w: 420, d: 420, solid: true },
     { kind: 'shoeRack', x: 9100, y: 8170, face: 'S', w: 700, d: 300, solid: true }
   ],
 

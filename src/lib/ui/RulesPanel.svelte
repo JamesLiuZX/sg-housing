@@ -27,7 +27,7 @@
     onselect(walls[(i + by + walls.length) % walls.length]);
   }
 
-  // The sheet's height follows its content on a spring rather than jumping from wall to wall.
+  // The sheet eases to the height of its content rather than jumping from wall to wall.
   let inner = $state(0);
 
   function onkey(e: KeyboardEvent): void {
@@ -316,6 +316,8 @@
     height: 5px;
     border-radius: 1.5px;
     background: var(--tone);
+    /* A hairline edge, so the deep shelter red still reads on night glass. */
+    box-shadow: 0 0 0 0.5px var(--line);
   }
 
   @media (min-width: 820px) {

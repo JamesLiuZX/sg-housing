@@ -4,7 +4,8 @@
  *
  * Query: ?skip=1 jumps straight to the finished model (use this for
  * screenshots: software rendering is slow); ?auto=0 stays on the plan; ?m=990 sets minutes of the day;
- * ?month=5 sets the month (0 to 11); ?lens=sun|rules|space.
+ * ?month=5 sets the month (0 to 11); ?lens=sun|rules|space; ?inset=330 reserves that many pixels at
+ * the bottom, as the interface's controls do (330 is the sun controls on a phone).
  */
 import { Viewer, type Lens } from './lib/engine/Viewer';
 import { hero4room } from './lib/plan/hero4room';
@@ -34,17 +35,31 @@ const api = {
 };
 (window as unknown as { blk: typeof api }).blk = api;
 
+const inset = Number(q.get('inset') ?? 0);
+if (inset > 0) {
+  // Stands in for the interface's controls, so a screenshot shows what they would cover.
+  const band = document.createElement('div');
+  band.style.cssText = `position:fixed;left:0;right:0;bottom:0;height:${inset}px;background:rgba(30,32,38,0.12);border-top:1px dashed rgba(30,32,38,0.4);pointer-events:none`;
+  document.body.append(band);
+}
+
 void (async () => {
   if (q.get('skip') === '1') {
-    viewer.jump(0);
+    viewer.jump(inset);
     const lens = q.get('lens') as Lens | null;
     if (lens) viewer.setLens(lens);
     api.ready = true;
     return;
   }
+  viewer.setInsets(inset);
+  if (q.get('auto') === '0') {
+    // Ready at once: blk.viewer.scrubIntro(t) holds any moment of the opening for a screenshot.
+    void viewer.showPlan();
+    api.ready = true;
+    return;
+  }
   await viewer.showPlan();
-  if (q.get('auto') === '0') return;
-  await viewer.intro(0);
+  await viewer.intro(inset);
   const lens = q.get('lens') as Lens | null;
   if (lens) viewer.setLens(lens);
   api.ready = true;

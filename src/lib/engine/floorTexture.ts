@@ -4,7 +4,11 @@ import type { Finish, Item, Plan, Pt } from '../plan/types';
 export interface FloorBake {
   /** The finishes, in colour. */
   canvas: HTMLCanvasElement;
-  /** Contact shading, grey: white is open floor. Applied to sky light only, never to sunlight. */
+  /**
+   * Contact shading, applied to sky light only, never to sunlight: red where
+   * walls meet the floor, green where furniture does, so the furniture's can
+   * come and go with the furniture. White is open floor.
+   */
   ao: HTMLCanvasElement;
   /** Plan-space rectangle both canvases cover, mm. */
   minX: number;
@@ -168,8 +172,8 @@ class Mask {
   }
 }
 
-/** Walls and furniture as they meet the floor. */
-function stampContacts(plan: Plan, m: Mask, furniture: boolean): void {
+/** Walls as they meet the floor. */
+function stampWalls(plan: Plan, m: Mask): void {
   for (const wall of plan.walls) {
     const f = frameOf(wall);
     const weight = wall.kind === 'parapet' ? 0.7 : 1;
@@ -178,7 +182,10 @@ function stampContacts(plan: Plan, m: Mask, furniture: boolean): void {
       m.stamp(wall.a[0] + f.dx * mid, wall.a[1] + f.dy * mid, f.dx, f.dy, (u1 - u0) / 2, wall.t / 2, weight);
     }
   }
-  if (!furniture) return;
+}
+
+/** Furniture as it meets the floor. */
+function stampItems(plan: Plan, m: Mask): void {
   for (const it of plan.items) {
     if (!it.solid || it.kind === 'rug') continue;
     const [w, d] = footprint(it);
@@ -227,21 +234,24 @@ export function bakeFloor(plan: Plan, maxSize = 2048): FloorBake {
 
   // Two scales of contact shading: a tight line where things touch, and a wide soft dimming.
   const k = 0.05;
-  const tight = new Mask(minX, minY, sizeX, sizeY, k);
-  stampContacts(plan, tight, true);
-  const wide = new Mask(minX, minY, sizeX, sizeY, k);
-  wide.data.set(tight.data);
-  blur(tight.data, tight.w, tight.h, 1);
-  blur(wide.data, wide.w, wide.h, 6);
+  const contact = (stamp: (m: Mask) => void): Float32Array => {
+    const tight = new Mask(minX, minY, sizeX, sizeY, k);
+    stamp(tight);
+    const wide = tight.data.slice();
+    blur(tight.data, tight.w, tight.h, 1);
+    blur(wide, tight.w, tight.h, 6);
+    return tight.data.map((t, i) => Math.max(0, 1 - 0.36 * Math.min(1, t * 1.3) - 0.3 * Math.min(1, wide[i] * 1.2)));
+  };
+  const byWalls = contact((m) => stampWalls(plan, m));
+  const byItems = contact((m) => stampItems(plan, m));
   const ao = document.createElement('canvas');
-  ao.width = tight.w;
-  ao.height = tight.h;
+  ao.width = Math.ceil(sizeX * k);
+  ao.height = Math.ceil(sizeY * k);
   const actx = ao.getContext('2d')!;
-  const img = actx.createImageData(tight.w, tight.h);
-  for (let i = 0; i < tight.data.length; i++) {
-    const v = 1 - 0.36 * Math.min(1, tight.data[i] * 1.3) - 0.3 * Math.min(1, wide.data[i] * 1.2);
-    const g = Math.round(255 * Math.max(0, v));
-    img.data[i * 4] = img.data[i * 4 + 1] = img.data[i * 4 + 2] = g;
+  const img = actx.createImageData(ao.width, ao.height);
+  for (let i = 0; i < byWalls.length; i++) {
+    img.data[i * 4] = Math.round(255 * byWalls[i]);
+    img.data[i * 4 + 1] = Math.round(255 * byItems[i]);
     img.data[i * 4 + 3] = 255;
   }
   actx.putImageData(img, 0, 0);

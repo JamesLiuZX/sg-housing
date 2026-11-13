@@ -36,12 +36,27 @@ const LAMP = 4.2;
 const CUT_TIME = 0.4;
 /** Shadow-filter step in metres. The visible penumbra of a sun patch is about two and a half steps. */
 const SOFT_STEP = 0.016;
+/** How far outside the compass ring its N, E, S, W letters stand, metres. */
+const LETTER_OUT = 1.0;
+/** Length of the opening sequence, seconds. */
+const INTRO_TIME = 3.4;
+
+/** The two ends of the opening sequence. */
+interface IntroPlan {
+  from: { theta: number; phi: number };
+  to: { theta: number; phi: number };
+  d0: number;
+  d1: number;
+  pad0: number;
+  padX0: number;
+  bottom: number;
+}
 
 /** Sun colour by altitude: warm white high up, amber low down, red at the horizon. Degrees, sRGB. */
 const SUN_STOPS: [number, number][] = [
-  [-1, 0xff6a2e],
-  [3, 0xff8a45],
-  [8, 0xffa865],
+  [-1, 0xff7a3c],
+  [3, 0xff9452],
+  [8, 0xffae6e],
   [16, 0xffc68a],
   [28, 0xffdaae],
   [45, 0xffe8cc],
@@ -88,7 +103,7 @@ function letterSprite(text: string, strong: boolean): THREE.Sprite {
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
   const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false, opacity: 0 }));
-  s.scale.setScalar(strong ? 1.5 : 1.1);
+  s.scale.setScalar(strong ? 1.35 : 1.0);
   s.renderOrder = 6;
   return s;
 }
@@ -117,6 +132,10 @@ export class Viewer {
   private shadowProbe = new THREE.OrthographicCamera();
   /** Per wall, whether it should be cut down for the current camera. */
   private cutWant: Float32Array;
+  /** The opening being held still by scrubIntro, if any. */
+  private scrub: IntroPlan | null = null;
+  /** Sun direction the light field's bounce was last spread for. */
+  private bounceDir = new THREE.Vector3(0, -1, 0);
 
   private compass = new THREE.Group();
   private compassMats: { mat: THREE.Material & { opacity: number }; base: number }[] = [];
@@ -127,6 +146,8 @@ export class Viewer {
   private hourDots: THREE.Points;
   private drop: THREE.Line;
   private domeR: number;
+  /** The day's arc above the horizon, in the compass frame, for framing the sun lens. */
+  private pathPts: THREE.Vector3[] = [];
 
   private target = new THREE.Vector3();
   private w = 1;
@@ -225,7 +246,7 @@ export class Viewer {
     const tickPts: THREE.Vector3[] = [];
     for (let i = 0; i < 72; i++) {
       const a = (i / 72) * Math.PI * 2;
-      const len = i % 18 === 0 ? 0.55 : i % 9 === 0 ? 0.32 : 0.14;
+      const len = i % 18 === 0 ? 0.45 : i % 9 === 0 ? 0.28 : 0.12;
       tickPts.push(new THREE.Vector3(Math.sin(a) * this.domeR, 0, -Math.cos(a) * this.domeR));
       tickPts.push(new THREE.Vector3(Math.sin(a) * (this.domeR + len), 0, -Math.cos(a) * (this.domeR + len)));
     }
@@ -233,7 +254,7 @@ export class Viewer {
     (['N', 'E', 'S', 'W'] as const).forEach((letter, i) => {
       const sp = letterSprite(letter, i === 0);
       const a = (i * Math.PI) / 2;
-      sp.position.set(Math.sin(a) * (this.domeR + 1.25), 0.05, -Math.cos(a) * (this.domeR + 1.25));
+      sp.position.set(Math.sin(a) * (this.domeR + LETTER_OUT), 0.05, -Math.cos(a) * (this.domeR + LETTER_OUT));
       this.compassMats.push({ mat: sp.material, base: i === 0 ? 1 : 0.75 });
       this.compass.add(sp);
     });
@@ -306,6 +327,23 @@ export class Viewer {
 
   /** Distance at which the whole model fits the part of the screen not covered by controls. */
   private fit(theta: number, phi: number, margin = 0.86): number {
+    return this.framing(theta, phi, this.boxCorners(), this.target, false, margin).d;
+  }
+
+  private boxCorners(): THREE.Vector3[] {
+    const b = this.built.box;
+    const out: THREE.Vector3[] = [];
+    for (const x of [b.min.x, b.max.x]) for (const y of [-BASE, b.max.y]) for (const z of [b.min.z, b.max.z]) out.push(new THREE.Vector3(x, y, z));
+    return out;
+  }
+
+  /**
+   * The camera distance at which points fit the free part of the screen, seen
+   * from these angles about `base`. With `slide`, the target may also move up
+   * the screen, so something tall such as the sun's dome is centred instead of
+   * leaving the bottom of the view empty.
+   */
+  private framing(theta: number, phi: number, pts: THREE.Vector3[], base: THREE.Vector3, slide: boolean, margin = 0.86): { d: number; target: THREE.Vector3 } {
     const toCam = new THREE.Vector3().setFromSphericalCoords(1, Math.max(phi, 0.0006), theta);
     const fwd = toCam.clone().negate();
     const right = new THREE.Vector3(Math.cos(theta), 0, -Math.sin(theta));
@@ -313,19 +351,48 @@ export class Viewer {
     const t = Math.tan((DOLL_FOV * DEG) / 2);
     const tanV = ((t * (this.h - this.pad)) / (this.h + this.pad)) * margin;
     const tanH = ((t * (this.w - this.padX)) / (this.h + this.pad)) * margin;
-    const b = this.built.box;
-    let d = 0;
     const c = new THREE.Vector3();
-    for (const x of [b.min.x, b.max.x]) {
-      for (const y of [-BASE, b.max.y]) {
-        for (const z of [b.min.z, b.max.z]) {
-          c.set(x, y, z).sub(this.target);
-          const depth = c.dot(fwd);
-          d = Math.max(d, Math.abs(c.dot(right)) / tanH - depth, Math.abs(c.dot(up)) / tanV - depth);
-        }
+    const xs = pts.map((p) => Math.abs(c.copy(p).sub(base).dot(right)));
+    const ys = pts.map((p) => c.copy(p).sub(base).dot(up));
+    const zs = pts.map((p) => c.copy(p).sub(base).dot(fwd));
+    let across = 0;
+    for (let i = 0; i < pts.length; i++) across = Math.max(across, xs[i] / tanH - zs[i]);
+    const upright = (lift: number) => {
+      let d = 0;
+      for (let i = 0; i < pts.length; i++) d = Math.max(d, Math.abs(ys[i] - lift) / tanV - zs[i]);
+      return d;
+    };
+    let lift = 0;
+    if (slide) {
+      // Centre by height alone: when the width decides the distance, this still puts the
+      // middle of the content in the middle of the free space. The need is convex in the lift.
+      let lo = Math.min(...ys);
+      let hi = Math.max(...ys);
+      for (let k = 0; k < 40; k++) {
+        const a = lo + (hi - lo) / 3;
+        const b = hi - (hi - lo) / 3;
+        if (upright(a) < upright(b)) hi = b;
+        else lo = a;
       }
+      lift = (lo + hi) / 2;
     }
-    return d;
+    return { d: Math.max(across, upright(lift)), target: base.clone().addScaledVector(up, lift) };
+  }
+
+  /** Everything the sun lens draws, in world space: the ring and its letters on the table, the day's arc, and the sun. */
+  private domePoints(): THREE.Vector3[] {
+    this.compass.updateMatrixWorld();
+    const m = this.compass.matrixWorld;
+    const out: THREE.Vector3[] = [];
+    const r = this.domeR + LETTER_OUT + 0.7;
+    for (let i = 0; i < 32; i++) {
+      const a = (i / 32) * Math.PI * 2;
+      out.push(new THREE.Vector3(Math.sin(a) * r, 0, -Math.cos(a) * r).applyMatrix4(m));
+    }
+    for (const p of this.pathPts) out.push(p.clone().applyMatrix4(m));
+    // The sun with room for its glow.
+    if (this.sun.altitude > 0) out.push(this.onDome(this.sun).applyMatrix4(m).add(new THREE.Vector3(0, 0.9, 0)));
+    return out;
   }
 
   private setOrbit(theta: number, phi: number, dist: number): void {
@@ -333,6 +400,23 @@ export class Viewer {
     this.camera.up.copy(UP);
     this.camera.lookAt(this.target);
     this.dirty = true;
+  }
+
+  /**
+   * Keeps the depth range of an orbiting camera tight round the model. On a
+   * phone the dollhouse is framed from far off, and with a near plane at half
+   * a metre the millimetre lift of the section caps would start to flicker.
+   */
+  private fitDepth(least: number): void {
+    // Everything drawn outside walk mode lies within the dome and its letters, round the origin.
+    const dist = this.camera.position.length();
+    const reach = this.domeR + LETTER_OUT + 2;
+    const near = Math.max(least, dist - reach - 2);
+    const far = dist + reach + 10;
+    if (Math.abs(near - this.camera.near) < near * 0.02 && Math.abs(far - this.camera.far) < far * 0.02) return;
+    this.camera.near = near;
+    this.camera.far = far;
+    this.camera.updateProjectionMatrix();
   }
 
   private applyView(): void {
@@ -363,6 +447,11 @@ export class Viewer {
       this.setOrbit(a.theta, a.phi, this.fit(a.theta, a.phi, 0.8));
       return;
     }
+    // The sun's controls are tall on a phone, so its dome is framed again for the room they leave.
+    if (this.lens === 'sun' && this.mode === 'doll') {
+      this.reframe(bottom, left, 0.5);
+      return;
+    }
     void this.tweens.run('pad', 0.5, (k) => {
       this.pad = lerp(b0, bottom, k);
       this.padX = lerp(l0, left, k);
@@ -383,9 +472,8 @@ export class Viewer {
       this.camera.fov = this.walkFov();
       this.camera.updateProjectionMatrix();
     } else {
-      const d = this.fit(this.dollAngles().theta, this.dollAngles().phi);
-      this.controls.minDistance = d * 0.28;
-      this.controls.maxDistance = d * 1.7;
+      const a = this.dollAngles();
+      this.setLimits(this.fit(a.theta, a.phi));
     }
   }
 
@@ -396,14 +484,10 @@ export class Viewer {
     return this.tweens.run('draw', 1.6, (k) => (this.u.uDraw.value = k), { ease: ease.linear, delay: 0.25 });
   }
 
-  /** Walls rise from the plan, finishes wash in, furniture arrives, daylight comes up. */
-  async intro(bottom = 0): Promise<void> {
-    this.introRunning = true;
-    this.tweens.kill('draw');
-    this.u.uDraw.value = 1;
+  /** Where the opening starts and ends, taken from the plan view on screen now. */
+  private introPlan(bottom: number): IntroPlan {
     const from = this.planAngles();
     const to = this.dollAngles();
-    const d0 = this.camera.position.distanceTo(this.target);
     const pad0 = this.pad;
     const padX0 = this.padX;
     this.pad = bottom;
@@ -411,46 +495,78 @@ export class Viewer {
     const d1 = this.fit(to.theta, to.phi);
     this.pad = pad0;
     this.padX = padX0;
+    return { from, to, d0: this.camera.position.distanceTo(this.target), d1, pad0, padX0, bottom };
+  }
+
+  /**
+   * The opening sequence as a function of time, so it plays and scrubs alike.
+   * The camera tilts while the walls are still rising, so they are seen to
+   * grow rather than just shorten toward a camera overhead; finishes wash out
+   * from the front door behind them; furniture lands; and the sun comes up
+   * last, so its shadows fall on a finished room.
+   */
+  private introAt(p: IntroPlan, t: number): void {
+    const seg = (delay: number, dur: number, e: (k: number) => number = ease.linear) => e(clamp((t - delay) / dur, 0, 1));
+    this.u.uRise.value = seg(0, 1.8);
+    const k = seg(0.1, 2.6, ease.inOutQuart);
+    this.pad = lerp(p.pad0, p.bottom, k);
+    this.padX = lerp(p.padX0, 0, k);
+    this.applyView();
+    this.setOrbit(lerp(p.from.theta, p.to.theta, k), lerp(p.from.phi, p.to.phi, k), lerp(p.d0, p.d1, k));
+    this.u.uReveal.value = seg(0.6, 1.9, ease.inOut);
+    if (this.furnished) this.u.uPop.value = seg(1.5, 1.6);
+    this.sunGain = seg(2.0, 1.4, ease.out);
+    this.applyLight();
+  }
+
+  /** Walls rise from the plan, finishes wash in, furniture arrives, daylight comes up. */
+  async intro(bottom = 0): Promise<void> {
+    this.introRunning = true;
+    this.tweens.kill('draw');
+    this.u.uDraw.value = 1;
+    const p = this.introPlan(bottom);
     // Walls that will be cut for the finished view only ever rise to their stub.
-    this.stepCuts(0, to);
-    void this.tweens.run('rise', 1.8, (k) => (this.u.uRise.value = k), { ease: ease.linear });
-    void this.tweens.run(
-      'camera',
-      2.6,
-      (k) => {
-        this.pad = lerp(pad0, bottom, k);
-        this.padX = lerp(padX0, 0, k);
-        this.applyView();
-        this.setOrbit(lerp(from.theta, to.theta, k), lerp(from.phi, to.phi, k), lerp(d0, d1, k));
-      },
-      { ease: ease.inOutQuart, delay: 0.1 }
-    );
-    void this.tweens.run('reveal', 1.9, (k) => (this.u.uReveal.value = k), { ease: ease.inOut, delay: 0.6 });
-    if (this.furnished) void this.tweens.run('pop', 1.6, (k) => (this.u.uPop.value = k), { ease: ease.linear, delay: 1.5 });
-    await this.tweens.run(
-      'gain',
-      1.4,
-      (k) => {
-        this.sunGain = k;
-        this.applyLight();
-      },
-      { ease: ease.out, delay: 2.0 }
-    );
+    this.stepCuts(0, p.to);
+    await this.tweens.run('intro', INTRO_TIME, (k) => this.introAt(p, k * INTRO_TIME), { ease: ease.linear });
     (this.built.caps.material as THREE.Material).transparent = false;
     (this.built.caps.material as THREE.Material).needsUpdate = true;
     this.mode = 'doll';
     this.introRunning = false;
-    this.controls.minDistance = d1 * 0.28;
-    this.controls.maxDistance = d1 * 1.7;
+    this.setLimits(p.d1);
     this.controls.enabled = true;
     this.controls.update();
     this.orbitLive = true;
     this.hooks.mode?.('doll');
   }
 
+  /**
+   * Holds the opening sequence at `t` seconds, from the plan view, for
+   * checking its frames one at a time. Call `jump` to leave it.
+   */
+  scrubIntro(t: number, bottom = 0): void {
+    if (this.mode !== 'plan') return;
+    if (!this.scrub) {
+      this.tweens.kill('draw');
+      this.u.uDraw.value = 1;
+      this.introRunning = true;
+      this.scrub = this.introPlan(bottom);
+      this.stepCuts(0, this.scrub.to);
+    }
+    this.introAt(this.scrub, clamp(t, 0, INTRO_TIME));
+    this.shadowDirty = true;
+  }
+
+  /** Zoom limits round the framed distance, out far enough for the whole sun dome. */
+  private setLimits(d: number): void {
+    const a = this.dollAngles();
+    this.controls.minDistance = d * 0.28;
+    const sun = this.framing(a.theta, a.phi, [...this.boxCorners(), ...this.domePoints()], this.target, true).d;
+    this.controls.maxDistance = Math.max(d * 1.7, sun * 1.25);
+  }
+
   /** Skips the opening sequence and lands on the finished model. For shared links and for tests. */
   jump(bottom = 0): void {
-    for (const tag of ['draw', 'rise', 'camera', 'reveal', 'pop', 'gain']) this.tweens.kill(tag);
+    for (const tag of ['draw', 'intro', 'camera', 'pop']) this.tweens.kill(tag);
     this.introRunning = false;
     this.u.uDraw.value = 1;
     this.u.uRise.value = 1;
@@ -468,8 +584,8 @@ export class Viewer {
     (this.built.caps.material as THREE.Material).transparent = false;
     (this.built.caps.material as THREE.Material).needsUpdate = true;
     this.mode = 'doll';
-    this.controls.minDistance = d * 0.28;
-    this.controls.maxDistance = d * 1.7;
+    this.scrub = null;
+    this.setLimits(d);
     this.controls.enabled = true;
     this.controls.update();
     this.orbitLive = true;
@@ -490,7 +606,7 @@ export class Viewer {
     if (c0 !== c1) void this.tweens.run('compass', 0.6, (k) => this.setCompass(lerp(c0, c1, k)));
     this.syncFurniture();
     if (lens !== 'rules') this.select(null);
-    if (this.mode === 'doll') this.reframe(lens === 'sun' ? 1.14 : 1);
+    if (this.mode === 'doll') this.reframe();
   }
 
   private setCompass(k: number): void {
@@ -501,17 +617,61 @@ export class Viewer {
     this.dirty = true;
   }
 
-  private reframe(scale: number): void {
+  /** The orbit distance and target that frame what the current lens shows, from these angles. */
+  private lensFraming(theta: number, phi: number): { d: number; target: THREE.Vector3 } {
+    const home = new THREE.Vector3(0, this.built.height * 0.3, 0);
+    // The sun lens frames its whole dome, so the north letter and the sun stay on screen on a phone.
+    if (this.lens === 'sun') return this.framing(theta, phi, [...this.boxCorners(), ...this.domePoints()], home, true);
+    return this.framing(theta, phi, this.boxCorners(), home, false);
+  }
+
+  /**
+   * The camera azimuth that sees the day's arc side on, so the sun can be
+   * followed and dragged along it: whichever side is nearer, and the current
+   * azimuth when it is already close enough.
+   */
+  private arcAzimuth(theta: number): number {
+    if (this.pathPts.length < 2) return theta;
+    this.compass.updateMatrixWorld();
+    const a = this.pathPts[0].clone().applyMatrix4(this.compass.matrixWorld);
+    const b = this.pathPts[this.pathPts.length - 1].clone().applyMatrix4(this.compass.matrixWorld);
+    const chord = Math.atan2(b.x - a.x, b.z - a.z);
+    let turn = Infinity;
+    for (const side of [chord + Math.PI / 2, chord - Math.PI / 2]) {
+      const t = Math.atan2(Math.sin(side - theta), Math.cos(side - theta));
+      if (Math.abs(t) < Math.abs(turn)) turn = t;
+    }
+    return Math.abs(turn) < 25 * DEG ? theta : theta + turn;
+  }
+
+  /**
+   * Moves the camera to frame the current lens, easing the screen insets to
+   * new values on the way when they are given. It keeps the user's angle,
+   * except that the sun lens swings round to see the day's arc side on.
+   */
+  private reframe(pad = this.pad, padX = this.padX, dur = 0.9): void {
     const off = this.camera.position.clone().sub(this.controls.target);
     const sph = new THREE.Spherical().setFromVector3(off);
+    const theta0 = sph.theta;
+    if (this.lens === 'sun') sph.theta = this.arcAzimuth(sph.theta);
+    const p0 = this.pad;
+    const x0 = this.padX;
+    this.pad = pad;
+    this.padX = padX;
+    const f = this.lensFraming(sph.theta, sph.phi);
+    this.pad = p0;
+    this.padX = x0;
+    this.controls.maxDistance = Math.max(this.controls.maxDistance, f.d * 1.25);
     const d0 = sph.radius;
-    const d1 = this.fit(sph.theta, sph.phi) * scale;
     const t0 = this.controls.target.clone();
     this.orbitLive = false;
     void this.tweens
-      .run('camera', 0.9, (k) => {
-        this.target.lerpVectors(t0, new THREE.Vector3(0, this.built.height * 0.3, 0), k);
-        this.setOrbit(sph.theta, sph.phi, lerp(d0, d1, k));
+      .run('camera', dur, (k) => {
+        this.pad = lerp(p0, pad, k);
+        this.padX = lerp(x0, padX, k);
+        this.applyView();
+        this.target.lerpVectors(t0, f.target, k);
+        this.setOrbit(lerp(theta0, sph.theta, k), sph.phi, lerp(d0, f.d, k));
       })
       .then(() => {
         if (this.mode !== 'doll') return;
@@ -558,10 +718,12 @@ export class Viewer {
   setDayPath(points: PathPoint[]): void {
     const dots: number[] = [];
     const hours: number[] = [];
+    this.pathPts = [];
     for (const p of points) {
       if (p.altitude < -0.01) continue;
       const v = this.onDome(p);
       dots.push(v.x, v.y, v.z);
+      this.pathPts.push(v);
       if (p.minutes % 60 === 0) hours.push(v.x, v.y, v.z);
     }
     this.pathDots.geometry.setAttribute('position', new THREE.Float32BufferAttribute(dots, 3));
@@ -607,12 +769,14 @@ export class Viewer {
     sunColour(altitude, this.sunLight.color);
     this.fitShadow(dir);
 
+    // Near sunset the sky dims and only warms a little; the sun carries the gold, so the shade
+    // keeps its depth instead of the whole model turning one shade of peach.
     const warm = Math.pow(gold, 1.4);
-    const sky = col(0xe4ecf7).clone().lerp(col(0xf7d9bf), warm);
-    const ground = col(0xf2e8d8).clone().lerp(col(0xf1d2b2), warm);
+    const sky = col(0xe8eef6).clone().lerp(col(0xeedfd3), warm);
+    const ground = col(0xf2e8d8).clone().lerp(col(0xecd9c6), warm);
     this.hemi.color.copy(col(0x26304c)).lerp(sky, day);
     this.hemi.groundColor.copy(col(0x10131c)).lerp(ground, day);
-    this.hemi.intensity = lerp(1.1, 2.3, day);
+    this.hemi.intensity = lerp(1.1, 2.3, day) * (1 - 0.2 * warm);
     this.fill.color.copy(col(0x9fb0d4)).lerp(col(0xf2f5fb).clone().lerp(col(0xf6dcc4), warm), day);
     this.fill.intensity = lerp(0.35, 0.8, day);
 
@@ -620,7 +784,11 @@ export class Viewer {
     const lamps = (1 - smooth(0.2, 0.85, day)) * g;
     this.u.uLamp.value.copy(col(0xffc98c)).multiplyScalar(LAMP * lamps);
     (this.built.lamps.material as THREE.MeshLambertMaterial).emissiveIntensity = 2.6 * lamps;
-    this.built.field.setSun(dir);
+    // The bounce only depends on where the sun is, and the opening calls this every frame.
+    if (dir.distanceToSquared(this.bounceDir) > 1e-8) {
+      this.built.field.setSun(dir);
+      this.bounceDir.copy(dir);
+    }
     this.u.uBounce.value.copy(this.sunLight.color).multiplyScalar(this.sunLight.intensity / BOUNCE_SCALE);
     this.u.uDay.value = day;
 
@@ -958,7 +1126,7 @@ export class Viewer {
       // A unit-high box on the floor, scaled each frame to the wall as it is drawn, cut or not.
       const geo = new THREE.BoxGeometry((f.len + wall.t) / 1000 + 0.03, 1, wall.t / 1000 + 0.04).translate(0, 0.5, 0);
       const g = new THREE.Group();
-      g.add(new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.32, depthWrite: false })));
+      g.add(new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.16, depthWrite: false })));
       g.add(new THREE.LineSegments(new THREE.EdgesGeometry(geo), new THREE.LineBasicMaterial({ color: 0x1c1d20, transparent: true, opacity: 0.9 })));
       const [x, z] = this.built.toWorld((wall.a[0] + wall.b[0]) / 2, (wall.a[1] + wall.b[1]) / 2);
       g.position.set(x, -0.005, z);
@@ -968,6 +1136,7 @@ export class Viewer {
       this.highlight = { group: g, wall: this.plan.walls.indexOf(wall), h: wh };
       this.fitHighlight();
     }
+    this.u.uSel.value = this.highlight ? this.highlight.wall : -1;
     this.dirty = true;
     this.hooks.wall?.(wall);
   }
@@ -986,6 +1155,22 @@ export class Viewer {
     out.x = (p.x * 0.5 + 0.5) * this.w;
     out.y = (-p.y * 0.5 + 0.5) * this.h;
     out.front = p.z < 1;
+  }
+
+  /**
+   * Insets and a fresh fit, travelling together. setInsets alone slides the
+   * model but keeps its size, so when a much taller panel opens (the Sun lens,
+   * a wall's verdict) the model is left too big for the space above it. This
+   * re-fits for the new insets at the angle the user chose, resetting zoom and
+   * pan as a lens change does. Outside the dollhouse it is plain setInsets.
+   */
+  fitInsets(bottom: number, left = 0): void {
+    if (this.mode !== 'doll' || this.introRunning || this.flying) {
+      this.setInsets(bottom, left);
+      return;
+    }
+    // reframe fits against the new insets and eases the insets there alongside the camera.
+    this.reframe(bottom, left, 0.5);
   }
 
   // ── Cutting walls away ────────────────────────────────────────────────────
@@ -1018,8 +1203,8 @@ export class Viewer {
     this.built.cuts.forEach((w, i) => {
       const on = this.cutWant[i] > 0.5;
       let want = 0;
-      // Looking almost straight down, nothing needs cutting.
-      if (active && w.cuttable && steep > 0.3) {
+      // Looking almost straight down, nothing needs cutting; a wall chosen in the rules lens stands up to be seen.
+      if (active && w.cuttable && steep > 0.3 && this.highlight?.wall !== i) {
         const facing = w.nx * cx + w.nz * cz;
         // Thresholds differ by state, so a wall seen at 45° does not flutter.
         if (w.out !== 0) want = w.out * facing > (on ? 0.1 : 0.22) ? 1 : 0;
@@ -1051,6 +1236,8 @@ export class Viewer {
     else if (this.orbitLive) this.controls.update();
     if (!this.introRunning && this.stepCuts(dt)) this.dirty = true;
     if (!this.dirty) return;
+    // A walk flight needs a near plane small enough for the room once it gets there.
+    if (this.mode !== 'walk' || this.flying) this.fitDepth(this.flying ? 0.06 : 0.5);
     this.dirty = false;
     if (this.shadowDirty) {
       this.renderer.shadowMap.needsUpdate = true;

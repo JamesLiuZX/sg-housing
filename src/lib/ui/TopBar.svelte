@@ -4,7 +4,8 @@
   let { plan }: { plan: Plan } = $props();
 </script>
 
-<header class="bar">
+<!-- data-avoid: room labels keep clear of it. -->
+<header class="bar" data-avoid>
   <span class="mark">BLK</span>
   <span class="rule" aria-hidden="true"></span>
   <p class="what">

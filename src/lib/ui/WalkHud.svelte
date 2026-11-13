@@ -18,8 +18,9 @@
     viewer,
     session,
     frames,
+    landed = true,
     onexit
-  }: { viewer: Viewer; session: Session; frames: Set<() => void>; onexit: () => void } = $props();
+  }: { viewer: Viewer; session: Session; frames: Set<() => void>; landed?: boolean; onexit: () => void } = $props();
 
   // The plan is fixed for the life of the page, so the map is drawn from it once.
   // svelte-ignore state_referenced_locally
@@ -73,6 +74,8 @@
     const name = plan.rooms.find((r) => r.id === roomId)?.name ?? '';
     return name === 'Living' ? 'Living room' : name;
   });
+  /** "the kitchen", but "bedroom 2". */
+  const where = $derived(/^bedroom \d/i.test(room) ? room.toLowerCase() : `the ${room.toLowerCase()}`);
   let start: { x: number; y: number; yaw: number } | null = null;
 
   function place(): void {
@@ -91,23 +94,27 @@
   onMount(() => {
     frames.add(place);
     place();
-    // The hint waits for the camera to land, then leaves after the first move or a few seconds.
-    const show = setTimeout(() => (hint = !moved), 1500);
-    const hide = setTimeout(() => (hint = false), 8500);
+    return () => frames.delete(place);
+  });
+
+  // The hint waits for the camera to land, then leaves after the first move or a few seconds.
+  $effect(() => {
+    if (moved) {
+      hint = false;
+      return;
+    }
+    if (!landed) return;
+    const show = setTimeout(() => (hint = true), 300);
+    const hide = setTimeout(() => (hint = false), 6300);
     return () => {
-      frames.delete(place);
       clearTimeout(show);
       clearTimeout(hide);
     };
   });
-
-  $effect(() => {
-    if (moved) hint = false;
-  });
 </script>
 
 <div class="hud">
-  <div class="corner left" in:fly={{ y: -10, duration: ms(420), delay: ms(600) }} out:fade={{ duration: ms(160) }}>
+  <div class="corner" in:fly={{ y: -10, duration: ms(420), delay: ms(600) }} out:fade={{ duration: ms(160) }}>
     <button class="out glass" onclick={onexit}>
       <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
         <path d="M9 2.4 15 5.7v6.6L9 15.6l-6-3.3V5.7L9 2.4Z" />
@@ -118,7 +125,7 @@
     <p class="disclose">Computer-generated model, not a photograph</p>
   </div>
 
-  <figure class="map glass" aria-label={room ? `Plan of the flat. You are in the ${room.toLowerCase()}.` : 'Plan of the flat'} in:fly={{ y: -10, duration: ms(420), delay: ms(680) }} out:fade={{ duration: ms(160) }}>
+  <figure class="map glass" aria-label={room ? `Plan of the flat. You are in ${where}.` : 'Plan of the flat'} in:fly={{ y: -10, duration: ms(420), delay: ms(680) }} out:fade={{ duration: ms(160) }}>
     <svg viewBox="{box.x} {box.y} {box.w} {box.h}" aria-hidden="true">
       <defs>
         <radialGradient id="hud-cone" gradientUnits="userSpaceOnUse" cx="0" cy="0" r="2900">

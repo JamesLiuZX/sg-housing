@@ -78,6 +78,8 @@ export interface Uniforms {
   uInside: THREE.IUniform<number>;
   /** 0 night to 1 day, for the unlit section caps. */
   uDay: THREE.IUniform<number>;
+  /** The wall chosen in the rules lens, or -1. The others step back so it stands out. */
+  uSel: THREE.IUniform<number>;
 }
 
 /** Height in metres of a wall cut down so the camera can see past it. */
@@ -103,7 +105,8 @@ export function makeUniforms(walls: number, height: number): Uniforms {
     uLamp: { value: new THREE.Color(0, 0, 0) },
     uBounce: { value: new THREE.Color(0, 0, 0) },
     uInside: { value: 0 },
-    uDay: { value: 1 }
+    uDay: { value: 1 },
+    uSel: { value: -1 }
   };
 }
 
@@ -123,12 +126,16 @@ export interface Features {
   field?: boolean;
   /** Darken light from the sky and the room near the floor, over this many metres. */
   foot?: number;
+  /** Ceiling height, metres: indoors, light falls off a little where walls meet the ceiling. Needs field. */
+  head?: number;
   /** Soft-edged sun shadows. */
   soft?: boolean;
   /** Clear when seen straight through, milky along the pane. */
   glass?: boolean;
   /** The floor: blank paper until uReveal sweeps out from the door. */
   reveal?: { rect: THREE.Vector4; origin: THREE.Vector2; reach: number };
+  /** Baked contact shading on the map's UVs: red from walls, green from furniture, which fades with uPop. */
+  contact?: THREE.Texture;
 }
 
 const BACK_OUT = /* glsl */ `
@@ -203,7 +210,7 @@ export function installToneMapping(): void {
 export function shade<T extends THREE.Material>(mat: T, u: Uniforms, f: Features): T {
   const walls = u.uCut.value.length;
   const rule = f.rule ?? 0;
-  const lit = !!(f.field || f.foot);
+  const lit = !!(f.field || f.foot || f.contact);
   const key = [
     'blk',
     f.rise ? 'r' : '',
@@ -213,9 +220,11 @@ export function shade<T extends THREE.Material>(mat: T, u: Uniforms, f: Features
     f.cap ? 'c' : '',
     f.field ? 'l' : '',
     f.foot ? `t${f.foot}` : '',
+    f.head ? `h${f.head}` : '',
     f.soft ? 's' : '',
     f.glass ? 'g' : '',
-    f.reveal ? 'v' : ''
+    f.reveal ? 'v' : '',
+    f.contact ? 'k' : ''
   ].join('');
 
   const uniforms: Record<string, THREE.IUniform> = {};
@@ -263,11 +272,13 @@ export function shade<T extends THREE.Material>(mat: T, u: Uniforms, f: Features
     vBody += 'transformed = aPivot + (transformed - aPivot) * blkS;\n';
   }
   if (rule) {
-    uniforms.uRule = u.uRule;
-    vHead += 'attribute vec3 aRule;\nvarying vec3 vBlkRule;\n';
+    Object.assign(uniforms, { uRule: u.uRule, uSel: u.uSel });
+    vHead += 'attribute vec3 aRule;\nvarying vec3 vBlkRule;\nvarying float vBlkSel;\nuniform float uSel;\n';
+    // With a wall chosen, every other wall keeps only a hint of its verdict.
     vBody += 'vBlkRule = aRule;\n';
-    fHead += 'uniform float uRule;\nvarying vec3 vBlkRule;\n';
-    fColor += `diffuseColor.rgb = mix(diffuseColor.rgb, vBlkRule, uRule * ${rule.toFixed(2)});\n`;
+    vBody += f.fold ? 'vBlkSel = uSel < -0.5 ? 1.0 : 1.0 - step(0.5, abs(aWall - uSel));\n' : 'vBlkSel = 1.0;\n';
+    fHead += 'uniform float uRule;\nvarying vec3 vBlkRule;\nvarying float vBlkSel;\n';
+    fColor += `diffuseColor.rgb = mix(diffuseColor.rgb, vBlkRule, uRule * ${rule.toFixed(2)} * mix(0.38, 1.0, vBlkSel));\n`;
   }
   if (f.cap) fColor += 'diffuseColor.rgb *= mix(0.34, 1.0, uDay);\n';
   if (lit) {
@@ -277,6 +288,12 @@ export function shade<T extends THREE.Material>(mat: T, u: Uniforms, f: Features
     fLight += 'float blkAo = 1.0;\n';
   }
   if (f.foot) fLight += `blkAo *= mix(0.62, 1.0, smoothstep(-0.02, ${f.foot.toFixed(3)}, vBlkY));\n`;
+  if (f.contact) {
+    Object.assign(uniforms, { uContactMap: { value: f.contact }, uPop: u.uPop });
+    fHead += 'uniform sampler2D uContactMap;\nuniform float uPop;\n';
+    // Furniture's shading arrives with the furniture and leaves with it.
+    fLight += 'vec2 blkC = texture2D(uContactMap, vMapUv).rg;\nblkAo *= blkC.r * mix(1.0, blkC.g, clamp(uPop, 0.0, 1.0));\n';
+  }
   if (f.field) {
     Object.assign(uniforms, { uField: u.uField, uFieldRect: u.uFieldRect, uLamp: u.uLamp, uBounce: u.uBounce, uInside: u.uInside });
     vHead += 'uniform vec4 uFieldRect;\nvarying vec2 vBlkFieldUv;\nvarying float vBlkUp;\n';
@@ -298,6 +315,8 @@ irradiance *= mix(1.0, 0.42 + 0.78 * blkF.b, uInside * blkF.a);
 // Bounce mostly escapes through the open top of the dollhouse; under the ceiling it stays.
 irradiance += uLamp * blkF.r * (0.72 + 0.28 * max(vBlkUp, 0.0)) + uBounce * blkF.g * mix(0.35, 1.0, uInside);
 `;
+    // Only indoors: from the dollhouse, the top of a wall is a section cut, not a corner.
+    if (f.head) fLight += `blkAo *= 1.0 - 0.16 * uInside * blkF.a * smoothstep(${(f.head - 0.4).toFixed(3)}, ${f.head.toFixed(3)}, vBlkY);\n`;
   }
   if (lit) fLight += 'irradiance *= blkAo;\n';
   if (f.glass) {

@@ -208,7 +208,7 @@ export function buildFlat(plan: Plan, u: Uniforms, maxAniso: number): Built {
 
   const walls = new THREE.Mesh(
     wallQ.build(),
-    shade(new THREE.MeshLambertMaterial({ vertexColors: true }), u, { rise: true, fold: true, rule: 0.82, field: true, foot: 0.5, soft: true })
+    shade(new THREE.MeshLambertMaterial({ vertexColors: true }), u, { rise: true, fold: true, rule: 0.6, field: true, foot: 0.5, head: H, soft: true })
   );
   walls.castShadow = true;
   walls.receiveShadow = true;
@@ -223,7 +223,7 @@ export function buildFlat(plan: Plan, u: Uniforms, maxAniso: number): Built {
   // their shadow: without it the sun would slip into a room over the top of every door.
   const heads = new THREE.Mesh(
     headQ.build(),
-    shade(new THREE.MeshLambertMaterial({ vertexColors: true, transparent: true, opacity: 0 }), u, { rise: true, fold: true, field: true, soft: true })
+    shade(new THREE.MeshLambertMaterial({ vertexColors: true, transparent: true, opacity: 0 }), u, { rise: true, fold: true, field: true, head: H, soft: true })
   );
   heads.castShadow = true;
   heads.receiveShadow = true;
@@ -326,10 +326,11 @@ export function buildFlat(plan: Plan, u: Uniforms, maxAniso: number): Built {
     return g;
   };
 
-  const floorMat = shade(new THREE.MeshLambertMaterial({ map: tex, aoMap: aoTex }), u, {
+  const floorMat = shade(new THREE.MeshLambertMaterial({ map: tex }), u, {
     field: true,
     soft: true,
-    reveal: { rect, origin: new THREE.Vector2(ex, ez), reach: reach / 1000 }
+    reveal: { rect, origin: new THREE.Vector2(ex, ez), reach: reach / 1000 },
+    contact: aoTex
   });
   const floor = new THREE.Mesh(flat(floorPolys, 0, true), floorMat);
   floor.receiveShadow = true;

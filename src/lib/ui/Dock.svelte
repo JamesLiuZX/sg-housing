@@ -22,7 +22,8 @@
   }: { session: Session; height?: number; onwalk: () => void; onselect: (wall: Wall) => void; onclear: () => void } = $props();
 </script>
 
-<div class="dock" bind:clientHeight={height}>
+<!-- data-avoid: room labels keep clear of it. -->
+<div class="dock" data-avoid bind:clientHeight={height}>
   <div class="panel">
     {#key session.lens}
       <div class="swap" in:fly={{ y: 16, duration: ms(420), delay: ms(110) }} out:fade={{ duration: ms(110) }}>
