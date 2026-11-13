@@ -35,7 +35,6 @@ export interface WallHit {
 
 export interface Built {
   root: THREE.Group;
-  walls: THREE.Mesh;
   caps: THREE.Mesh;
   /** Walls above door heads and the ceiling: seen only from inside, but always casting shadow. */
   shell: THREE.Mesh[];
@@ -228,6 +227,10 @@ export function buildFlat(plan: Plan, u: Uniforms, maxAniso: number): Built {
   heads.castShadow = true;
   heads.receiveShadow = true;
   heads.customDepthMaterial = depthFor('rise', u);
+  // Unseen until walking, and writing no depth either, or doorways would show holes from above.
+  const headMat = heads.material as THREE.Material;
+  headMat.colorWrite = false;
+  headMat.depthWrite = false;
   root.add(heads);
 
   // ── Windows and doors ────────────────────────────────────────────────────
@@ -484,7 +487,6 @@ export function buildFlat(plan: Plan, u: Uniforms, maxAniso: number): Built {
 
   return {
     root,
-    walls,
     caps,
     shell: [heads, ceiling],
     furniture: [furn, furnGlass, lamps],

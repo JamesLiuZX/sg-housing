@@ -19,7 +19,7 @@ const CELL = 100;
 /** Bounce is stored scaled up, so a sunny room's share fills the eight bits. */
 export const BOUNCE_SCALE = 10;
 /** Lamplight is stored scaled, so the pool under a ceiling bulb sits near 0.6. */
-export const LAMP_SCALE = 3;
+const LAMP_SCALE = 3;
 
 interface Win {
   /** Centre on the wall line and inward unit normal, plan mm. */
