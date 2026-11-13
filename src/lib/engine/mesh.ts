@@ -9,6 +9,7 @@ export class Merger {
   private rgb: number[] = [];
   private piv: number[] = [];
   private del: number[] = [];
+  private wal: number[] = [];
   private idx: number[] = [];
   private v = new THREE.Vector3();
   private nm = new THREE.Matrix3();
@@ -17,7 +18,7 @@ export class Merger {
     return this.pos.length === 0;
   }
 
-  add(geo: THREE.BufferGeometry, m: THREE.Matrix4, color: THREE.Color, pivot: THREE.Vector3, delay: number): void {
+  add(geo: THREE.BufferGeometry, m: THREE.Matrix4, color: THREE.Color, pivot: THREE.Vector3, delay: number, wall: number): void {
     const p = geo.getAttribute('position');
     const n = geo.getAttribute('normal');
     const base = this.pos.length / 3;
@@ -30,6 +31,7 @@ export class Merger {
       this.rgb.push(color.r, color.g, color.b);
       this.piv.push(pivot.x, pivot.y, pivot.z);
       this.del.push(delay);
+      this.wal.push(wall);
     }
     const index = geo.getIndex();
     if (index) for (let i = 0; i < index.count; i++) this.idx.push(base + index.getX(i));
@@ -44,6 +46,7 @@ export class Merger {
     g.setAttribute('color', new THREE.Float32BufferAttribute(this.rgb, 3));
     g.setAttribute('aPivot', new THREE.Float32BufferAttribute(this.piv, 3));
     g.setAttribute('aDelay', new THREE.Float32BufferAttribute(this.del, 1));
+    g.setAttribute('aWall', new THREE.Float32BufferAttribute(this.wal, 1));
     g.setIndex(this.idx);
     g.computeBoundingSphere();
     return g;
@@ -51,6 +54,13 @@ export class Merger {
 }
 
 type Target = 'solid' | 'glass' | 'lamp';
+
+export interface PlaceOptions {
+  /** The wall this object hangs on or stands in, so it is cut down with it. */
+  wall?: number;
+  /** Height it grows from, metres. Things hung on a wall appear where they hang, not from the floor. */
+  pivotY?: number;
+}
 
 /**
  * A modelling kit: place a frame of reference, then add simple rounded
@@ -63,6 +73,7 @@ export class Kit {
   private stack: THREE.Matrix4[] = [new THREE.Matrix4()];
   private pivot = new THREE.Vector3();
   private delay = 0;
+  private wall = -1;
   private tmp = new THREE.Matrix4();
   private e = new THREE.Euler();
 
@@ -71,10 +82,11 @@ export class Kit {
   }
 
   /** Start a new object at a floor position, turned about the vertical. */
-  place(x: number, z: number, rotY: number, delay: number, fn: () => void): void {
+  place(x: number, z: number, rotY: number, delay: number, fn: () => void, opts: PlaceOptions = {}): void {
     this.stack.push(new THREE.Matrix4().makeRotationY(rotY).setPosition(x, 0, z));
-    this.pivot.set(x, 0, z);
+    this.pivot.set(x, opts.pivotY ?? 0, z);
     this.delay = delay;
+    this.wall = opts.wall ?? -1;
     fn();
     this.stack.pop();
   }
@@ -92,13 +104,17 @@ export class Kit {
     else this.tmp.identity();
     this.tmp.setPosition(x, y, z);
     const m = this.top.clone().multiply(this.tmp);
-    this[to].add(geo, m, col(hex), this.pivot, this.delay);
+    this[to].add(geo, m, col(hex), this.pivot, this.delay, this.wall);
   }
 
-  /** A box sitting on height y0, centred on x and z. */
+  /**
+   * A box sitting on height y0, centred on x and z. Corners are rounded only
+   * where the rounding is big enough to catch the light; below that it is a
+   * plain box, which keeps the triangle count down.
+   */
   box(w: number, h: number, d: number, x: number, y0: number, z: number, hex: number, r = 0.012, rot?: [number, number, number], to: Target = 'solid'): void {
     const rr = Math.min(r, Math.min(w, h, d) / 2 - 0.0005);
-    const geo = rr > 0.002 ? new RoundedBoxGeometry(w, h, d, rr > 0.04 ? 3 : 2, rr) : new THREE.BoxGeometry(w, h, d);
+    const geo = rr >= 0.008 ? new RoundedBoxGeometry(w, h, d, rr > 0.04 ? 2 : 1, rr) : new THREE.BoxGeometry(w, h, d);
     this.emit(geo, x, y0 + h / 2, z, hex, rot, to);
   }
 
@@ -109,7 +125,7 @@ export class Kit {
 
   /** A squashed sphere centred on a point. */
   ball(r: number, x: number, y: number, z: number, hex: number, sx = 1, sy = 1, sz = 1): void {
-    const geo = new THREE.SphereGeometry(r, 14, 10);
+    const geo = new THREE.SphereGeometry(r, 12, 8);
     geo.scale(sx, sy, sz);
     this.emit(geo, x, y, z, hex, undefined, 'solid');
   }

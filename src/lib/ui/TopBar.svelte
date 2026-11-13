@@ -28,6 +28,11 @@
     row-gap: 6px;
     pointer-events: none;
     animation: fade-in 600ms var(--ease-out) both;
+    /* The model can be turned and zoomed under the bar; a paper halo keeps the words readable over it. */
+    text-shadow:
+      0 0 2px var(--surface),
+      0 0 6px var(--surface),
+      0 0 12px rgb(var(--surface-rgb) / 0.8);
   }
   .mark {
     font: 700 30px/0.8 var(--font-mark);

@@ -6,11 +6,13 @@
   import Dock from './lib/ui/Dock.svelte';
   import Landing from './lib/ui/Landing.svelte';
   import { readParams } from './lib/ui/params';
+  import PlanMarks from './lib/ui/PlanMarks.svelte';
   import RoomLabels from './lib/ui/RoomLabels.svelte';
   import { walkTarget } from './lib/ui/scene';
   import { Session } from './lib/ui/session.svelte';
   import TopBar from './lib/ui/TopBar.svelte';
   import WalkHud from './lib/ui/WalkHud.svelte';
+  import WallPin from './lib/ui/WallPin.svelte';
 
   const params = readParams();
   const session = new Session(hero4room, {
@@ -38,14 +40,18 @@
   const dockGuess = () => (wide ? 150 : 148);
 
   onMount(() => {
-    const atmosphere = new Atmosphere(document.documentElement, sky!, (night) => (session.night = night));
+    const atmosphere = new Atmosphere(document.documentElement, sky!, (night) => {
+      session.night = night;
+    });
     const v = new Viewer(canvas!, hero4room, {
       frame: () => frames.forEach((f) => f()),
       mode: (m) => {
         if (m === 'walk') session.stage = 'walk';
         else if (m === 'doll' && session.stage === 'walk') session.stage = 'explore';
       },
-      wall: (w) => (session.wall = w),
+      wall: (w) => {
+        session.wall = w;
+      },
       atmosphere: (day, gold) => atmosphere.set(day, gold)
     });
     v.setBearing(session.bearing);
@@ -111,8 +117,14 @@
   <div class="sky" bind:this={sky}></div>
   <canvas bind:this={canvas} aria-label="3D model of the flat"></canvas>
 
+  {#if viewer && (session.stage === 'landing' || session.stage === 'opening')}
+    <PlanMarks {viewer} {frames} bearing={session.bearing} leaving={session.stage === 'opening'} />
+  {/if}
   {#if viewer && session.stage === 'explore'}
     <RoomLabels {viewer} {session} {frames} onpick={walkInto} />
+    {#if session.lens === 'rules' && session.wall}
+      <WallPin {viewer} {frames} wall={session.wall} />
+    {/if}
   {/if}
 
   <div class="layer">
@@ -122,7 +134,13 @@
 
     {#if session.stage === 'explore'}
       <TopBar plan={hero4room} />
-      <Dock {session} bind:height={dockH} onwalk={() => walkInto(null)} />
+      <Dock
+        {session}
+        bind:height={dockH}
+        onwalk={() => walkInto(null)}
+        onselect={(w) => viewer?.select(w)}
+        onclear={() => viewer?.select(null)}
+      />
     {/if}
 
     {#if viewer && session.stage === 'walk'}

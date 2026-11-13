@@ -1,6 +1,6 @@
 import type { Item } from '../plan/types';
 import { PAL } from './materials';
-import type { Kit } from './mesh';
+import type { Kit, PlaceOptions } from './mesh';
 
 const HALF = Math.PI / 2;
 const turn = { S: 0, E: HALF, N: Math.PI, W: -HALF } as const;
@@ -406,12 +406,26 @@ const makers: Record<string, Maker> = {
   }
 };
 
-/** Builds every furnishing of a plan into the kit. Delay staggers the pop-in by distance from a point. */
-export function furnish(k: Kit, items: Item[], toWorld: (x: number, y: number) => [number, number], delayOf: (x: number, y: number) => number): void {
+/** Height at which pieces hung on a wall sit, metres. They appear there, and leave with their wall. */
+export const MOUNTED: Record<string, number> = { aircon: 2.34, hsVent: 2.2 };
+
+/**
+ * Builds every furnishing of a plan into the kit. Delay staggers the pop-in
+ * by distance from a point; `wallOf` finds the wall a mounted piece hangs on.
+ */
+export function furnish(
+  k: Kit,
+  items: Item[],
+  toWorld: (x: number, y: number) => [number, number],
+  delayOf: (x: number, y: number) => number,
+  wallOf: (it: Item) => number
+): void {
   for (const it of items) {
     const make = makers[it.kind];
     if (!make) continue;
     const [x, z] = toWorld(it.x, it.y);
-    k.place(x, z, turn[it.face ?? 'S'], delayOf(it.x, it.y), () => make(k, it));
+    const mount = MOUNTED[it.kind];
+    const opts: PlaceOptions = mount === undefined ? {} : { wall: wallOf(it), pivotY: mount };
+    k.place(x, z, turn[it.face ?? 'S'], delayOf(it.x, it.y), () => make(k, it), opts);
   }
 }

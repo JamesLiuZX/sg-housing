@@ -107,8 +107,8 @@ export function offsetPoly(poly: Pt[], dist: number[] | number): Pt[] {
   return out;
 }
 
-/** Half-thickness of the wall lying along a room edge, or 0 where the edge is open. */
-function wallAlong(plan: Plan, p: Pt, q: Pt): number {
+/** The wall lying along an edge of a room or the outline, or null where the edge is open. */
+export function wallOnEdge(plan: Plan, p: Pt, q: Pt): Wall | null {
   const mx = (p[0] + q[0]) / 2;
   const my = (p[1] + q[1]) / 2;
   for (const w of plan.walls) {
@@ -118,9 +118,15 @@ function wallAlong(plan: Plan, p: Pt, q: Pt): number {
     const ry = my - w.a[1];
     const u = rx * f.dx + ry * f.dy;
     const v = rx * f.nx + ry * f.ny;
-    if (Math.abs(v) < 1 && u > 0 && u < f.len) return w.t / 2;
+    if (Math.abs(v) < 1 && u > 0 && u < f.len) return w;
   }
-  return 0;
+  return null;
+}
+
+/** Half-thickness of the wall lying along a room edge, or 0 where the edge is open. */
+function wallAlong(plan: Plan, p: Pt, q: Pt): number {
+  const w = wallOnEdge(plan, p, q);
+  return w ? w.t / 2 : 0;
 }
 
 /** The room as you could measure it with a tape: centreline polygon less wall thickness. */

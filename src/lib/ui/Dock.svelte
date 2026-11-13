@@ -1,6 +1,8 @@
 <script lang="ts">
   import { fade, fly } from 'svelte/transition';
+  import type { Wall } from '../plan/types';
   import LensDial from './LensDial.svelte';
+  import { ms } from './motion';
   import RulesPanel from './RulesPanel.svelte';
   import type { Session } from './session.svelte';
   import SpacePanel from './SpacePanel.svelte';
@@ -11,19 +13,25 @@
    * few controls that belong to the lens in use. Its height is reported so
    * the engine can centre the model in what is left.
    */
-  let { session, height = $bindable(0), onwalk }: { session: Session; height?: number; onwalk: () => void } = $props();
+  let {
+    session,
+    height = $bindable(0),
+    onwalk,
+    onselect,
+    onclear
+  }: { session: Session; height?: number; onwalk: () => void; onselect: (wall: Wall) => void; onclear: () => void } = $props();
 </script>
 
 <div class="dock" bind:clientHeight={height}>
   <div class="panel">
     {#key session.lens}
-      <div class="swap" in:fly={{ y: 16, duration: 420, delay: 110 }} out:fade={{ duration: 110 }}>
+      <div class="swap" in:fly={{ y: 16, duration: ms(420), delay: ms(110) }} out:fade={{ duration: ms(110) }}>
         {#if session.lens === 'space'}
           <SpacePanel {session} {onwalk} />
         {:else if session.lens === 'sun'}
           <SunPanel {session} />
         {:else}
-          <RulesPanel {session} />
+          <RulesPanel {session} {onselect} {onclear} />
         {/if}
       </div>
     {/key}

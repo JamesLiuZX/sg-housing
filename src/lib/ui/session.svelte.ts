@@ -94,8 +94,16 @@ export class Session {
     void this.#clock.set(m, { instant: prefersReducedMotion.current });
   }
 
+  /**
+   * Steps the sun by `delta` minutes, landing on that step's grid, so arrow
+   * keys read 4:30, 4:40, 4:50 even after a drag left the sun at 4:33.
+   */
   nudge(delta: number): void {
-    this.scrub(this.#clock.target + delta);
+    const step = Math.abs(delta);
+    if (!step) return;
+    const t = this.#clock.target;
+    const next = delta > 0 ? Math.floor(t / step + 1e-6) * step + step : Math.ceil(t / step - 1e-6) * step - step;
+    this.scrub(next);
   }
 
   setMonth(month: number): void {

@@ -1,9 +1,12 @@
-import { boundsOf, frameOf, solidSpans } from '../plan/geometry';
+import { boundsOf, frameOf, pointInPoly, solidSpans } from '../plan/geometry';
 import type { Finish, Item, Plan, Pt } from '../plan/types';
 
 export interface FloorBake {
+  /** The finishes, in colour. */
   canvas: HTMLCanvasElement;
-  /** Plan-space rectangle the canvas covers, mm. */
+  /** Contact shading, grey: white is open floor. Applied to sky light only, never to sunlight. */
+  ao: HTMLCanvasElement;
+  /** Plan-space rectangle both canvases cover, mm. */
   minX: number;
   minY: number;
   sizeX: number;
@@ -25,11 +28,12 @@ function shade(hex: string, k: number): string {
   return `rgb(${f(n >> 16)},${f((n >> 8) & 255)},${f(n & 255)})`;
 }
 
+/** Finishes at true size, kept quiet: the joints are there when you look, and gone when you do not. */
 function paintFinish(ctx: CanvasRenderingContext2D, finish: Finish, x0: number, y0: number, x1: number, y1: number, s: number, seed: number): void {
   const rand = rng(seed);
   const px = (mm: number) => mm * s;
   if (finish === 'vinyl') {
-    // Timber-look planks, laid along the long side of the room.
+    // Timber-look planks, 180 by 1220 mm, laid along the long side of the room with staggered ends.
     const along = x1 - x0 >= y1 - y0;
     const plankW = 180;
     const plankL = 1220;
@@ -37,32 +41,48 @@ function paintFinish(ctx: CanvasRenderingContext2D, finish: Finish, x0: number, 
     const across1 = along ? y1 : x1;
     const run0 = along ? x0 : y0;
     const run1 = along ? x1 : y1;
-    for (let a = across0, row = 0; a < across1; a += plankW, row++) {
+    const rect = (r: number, a: number, len: number, wid: number) => {
+      if (along) ctx.fillRect(px(r), px(a), px(len), px(wid));
+      else ctx.fillRect(px(a), px(r), px(wid), px(len));
+    };
+    for (let a = across0; a < across1; a += plankW) {
       let r = run0 - rand() * plankL;
       while (r < run1) {
-        const len = plankL * (0.85 + rand() * 0.3);
-        ctx.fillStyle = shade('#d6ba93', 0.95 + rand() * 0.1);
-        if (along) ctx.fillRect(px(r), px(a), px(len) + 1, px(plankW) + 1);
-        else ctx.fillRect(px(a), px(r), px(plankW) + 1, px(len) + 1);
-        ctx.fillStyle = 'rgba(92,62,32,0.16)';
-        if (along) ctx.fillRect(px(r), px(a), 1, px(plankW));
-        else ctx.fillRect(px(a), px(r), px(plankW), 1);
+        const len = plankL * (0.8 + rand() * 0.4);
+        ctx.fillStyle = shade('#d3b58c', 0.955 + rand() * 0.075);
+        rect(r, a, len + 2 / s, plankW + 2 / s);
+        // A few long streaks of grain.
+        for (let g = 0; g < 4; g++) {
+          ctx.fillStyle = rand() < 0.5 ? 'rgba(120,84,46,0.07)' : 'rgba(255,240,215,0.08)';
+          rect(r + rand() * len * 0.2, a + 12 + rand() * (plankW - 24), len * (0.5 + rand() * 0.5), 4 + rand() * 8);
+        }
+        ctx.fillStyle = 'rgba(88,58,30,0.2)';
+        rect(r, a, 1 / s, plankW);
         r += len;
       }
-      ctx.fillStyle = 'rgba(92,62,32,0.13)';
-      if (along) ctx.fillRect(px(run0), px(a), px(run1 - run0), 1);
-      else ctx.fillRect(px(a), px(run0), 1, px(run1 - run0));
+      ctx.fillStyle = 'rgba(88,58,30,0.16)';
+      rect(run0, a, run1 - run0, 1 / s);
     }
     return;
   }
   const spec = {
-    porcelain: { base: '#e9e4d9', grid: 600, line: 'rgba(60,50,40,0.07)', vary: 0.018 },
-    tile: { base: '#dcdedb', grid: 300, line: 'rgba(40,50,55,0.10)', vary: 0.02 },
-    cement: { base: '#d3cfc7', grid: 0, line: '', vary: 0 }
+    porcelain: { base: '#e8e3d8', grid: 600, line: 'rgba(84,72,58,0.11)', vary: 0.014 },
+    tile: { base: '#dcdfdc', grid: 300, line: 'rgba(52,62,66,0.15)', vary: 0.018 },
+    cement: { base: '#d0ccc4', grid: 0, line: '', vary: 0 }
   }[finish];
   ctx.fillStyle = spec.base;
   ctx.fillRect(px(x0), px(y0), px(x1 - x0), px(y1 - y0));
-  if (!spec.grid) return;
+  if (!spec.grid) {
+    // Screed has no joints, only a faint trowelled cloud.
+    for (let i = 0; i < ((x1 - x0) * (y1 - y0)) / 90000; i++) {
+      ctx.fillStyle = rand() < 0.5 ? 'rgba(90,84,76,0.035)' : 'rgba(255,252,245,0.05)';
+      const r = 60 + rand() * 220;
+      ctx.beginPath();
+      ctx.arc(px(x0 + rand() * (x1 - x0)), px(y0 + rand() * (y1 - y0)), px(r), 0, Math.PI * 2);
+      ctx.fill();
+    }
+    return;
+  }
   for (let y = y0; y < y1; y += spec.grid) {
     for (let x = x0; x < x1; x += spec.grid) {
       ctx.fillStyle = shade(spec.base, 1 - spec.vary + rand() * spec.vary * 2);
@@ -103,10 +123,75 @@ function blur(data: Float32Array, w: number, h: number, r: number): void {
   }
 }
 
+/** A grid in plan millimetres, for masks that are stamped and then blurred. */
+class Mask {
+  readonly data: Float32Array;
+  readonly w: number;
+  readonly h: number;
+  constructor(
+    readonly minX: number,
+    readonly minY: number,
+    sizeX: number,
+    sizeY: number,
+    readonly k: number
+  ) {
+    this.w = Math.ceil(sizeX * k);
+    this.h = Math.ceil(sizeY * k);
+    this.data = new Float32Array(this.w * this.h);
+  }
+
+  /** A rectangle centred on (cx, cy), turned to the unit direction (ux, uy). */
+  stamp(cx: number, cy: number, ux: number, uy: number, halfU: number, halfV: number, weight: number): void {
+    const { k, w, minX, minY } = this;
+    const ext = Math.abs(ux) * halfU + Math.abs(uy) * halfV;
+    const eyt = Math.abs(uy) * halfU + Math.abs(ux) * halfV;
+    const x0 = Math.max(0, Math.floor((cx - ext - minX) * k));
+    const x1 = Math.min(w - 1, Math.ceil((cx + ext - minX) * k));
+    const y0 = Math.max(0, Math.floor((cy - eyt - minY) * k));
+    const y1 = Math.min(this.h - 1, Math.ceil((cy + eyt - minY) * k));
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        const rx = (x + 0.5) / k + minX - cx;
+        const ry = (y + 0.5) / k + minY - cy;
+        const u = rx * ux + ry * uy;
+        const v = -rx * uy + ry * ux;
+        if (Math.abs(u) <= halfU && Math.abs(v) <= halfV) this.data[y * w + x] = Math.max(this.data[y * w + x], weight);
+      }
+    }
+  }
+
+  fillPoly(poly: Pt[]): void {
+    for (let y = 0; y < this.h; y++) {
+      const py = (y + 0.5) / this.k + this.minY;
+      for (let x = 0; x < this.w; x++) if (pointInPoly((x + 0.5) / this.k + this.minX, py, poly)) this.data[y * this.w + x] = 1;
+    }
+  }
+}
+
+/** Walls and furniture as they meet the floor. */
+function stampContacts(plan: Plan, m: Mask, furniture: boolean): void {
+  for (const wall of plan.walls) {
+    const f = frameOf(wall);
+    const weight = wall.kind === 'parapet' ? 0.7 : 1;
+    for (const [u0, u1] of solidSpans(plan, wall)) {
+      const mid = (u0 + u1) / 2;
+      m.stamp(wall.a[0] + f.dx * mid, wall.a[1] + f.dy * mid, f.dx, f.dy, (u1 - u0) / 2, wall.t / 2, weight);
+    }
+  }
+  if (!furniture) return;
+  for (const it of plan.items) {
+    if (!it.solid || it.kind === 'rug') continue;
+    const [w, d] = footprint(it);
+    // Lighter than a wall: most furniture stands on legs or a plinth and lets the sky under it.
+    m.stamp(it.x, it.y, 1, 0, w / 2, d / 2, it.kind === 'plant' || it.kind === 'floorLamp' ? 0.32 : 0.5);
+  }
+}
+
 /**
- * Paints the whole floor into one image: each room's finish, then soft
- * shading where walls and furniture meet the floor. That shading is what
- * makes the model read as an object with weight, and it costs nothing to draw.
+ * Paints the whole floor into one image, each room in its finish, plus a
+ * second grey image of soft shading where walls and furniture meet the
+ * floor. That shading is what makes the model read as an object with
+ * weight, and it costs nothing to draw.
  */
 export function bakeFloor(plan: Plan, maxSize = 2048): FloorBake {
   const b = boundsOf(plan);
@@ -120,16 +205,9 @@ export function bakeFloor(plan: Plan, maxSize = 2048): FloorBake {
   canvas.width = Math.round(sizeX * s);
   canvas.height = Math.round(sizeY * s);
   const ctx = canvas.getContext('2d')!;
-  ctx.fillStyle = '#e9e4d9';
+  ctx.fillStyle = '#e8e3d8';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.translate(-minX * s, -minY * s);
-
-  const clipPoly = (poly: Pt[]) => {
-    ctx.beginPath();
-    poly.forEach(([x, y], i) => (i ? ctx.lineTo(x * s, y * s) : ctx.moveTo(x * s, y * s)));
-    ctx.closePath();
-    ctx.clip();
-  };
 
   plan.slabs.forEach((slab, i) => {
     const [x0, y0, x1, y1] = slab.rect;
@@ -139,115 +217,64 @@ export function bakeFloor(plan: Plan, maxSize = 2048): FloorBake {
     const xs = room.poly.map((p) => p[0]);
     const ys = room.poly.map((p) => p[1]);
     ctx.save();
-    clipPoly(room.poly);
+    ctx.beginPath();
+    room.poly.forEach(([x, y], j) => (j ? ctx.lineTo(x * s, y * s) : ctx.moveTo(x * s, y * s)));
+    ctx.closePath();
+    ctx.clip();
     paintFinish(ctx, room.finish, Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys), s, 17 + i * 31);
     ctx.restore();
   });
 
-  // Contact shading, computed at low resolution and blurred.
-  const k = 0.02; // px per mm
-  const mw = Math.ceil(sizeX * k);
-  const mh = Math.ceil(sizeY * k);
-  const mask = new Float32Array(mw * mh);
-  const stamp = (cx: number, cy: number, ux: number, uy: number, halfU: number, halfV: number, weight: number) => {
-    const ext = Math.abs(ux) * halfU + Math.abs(uy) * halfV;
-    const eyt = Math.abs(uy) * halfU + Math.abs(ux) * halfV;
-    const x0 = Math.max(0, Math.floor((cx - ext - minX) * k));
-    const x1 = Math.min(mw - 1, Math.ceil((cx + ext - minX) * k));
-    const y0 = Math.max(0, Math.floor((cy - eyt - minY) * k));
-    const y1 = Math.min(mh - 1, Math.ceil((cy + eyt - minY) * k));
-    for (let y = y0; y <= y1; y++) {
-      for (let x = x0; x <= x1; x++) {
-        const rx = x / k + minX - cx;
-        const ry = y / k + minY - cy;
-        const u = rx * ux + ry * uy;
-        const v = -rx * uy + ry * ux;
-        if (Math.abs(u) <= halfU && Math.abs(v) <= halfV) mask[y * mw + x] = Math.max(mask[y * mw + x], weight);
-      }
-    }
-  };
-  for (const wall of plan.walls) {
-    const f = frameOf(wall);
-    const weight = wall.kind === 'parapet' ? 0.6 : 1;
-    for (const [u0, u1] of solidSpans(plan, wall)) {
-      const mid = (u0 + u1) / 2;
-      stamp(wall.a[0] + f.dx * mid, wall.a[1] + f.dy * mid, f.dx, f.dy, (u1 - u0) / 2, wall.t / 2 + 60, weight);
-    }
-  }
-  for (const it of plan.items) {
-    if (!it.solid || it.kind === 'rug') continue;
-    const [w, d] = footprint(it);
-    stamp(it.x, it.y, 1, 0, w / 2, d / 2, 0.62);
-  }
-  blur(mask, mw, mh, 4);
-
-  const shadeCanvas = document.createElement('canvas');
-  shadeCanvas.width = mw;
-  shadeCanvas.height = mh;
-  const sctx = shadeCanvas.getContext('2d')!;
-  const img = sctx.createImageData(mw, mh);
-  for (let i = 0; i < mask.length; i++) {
-    const m = Math.min(1, mask[i] * 1.15);
-    const dark = m * m * 0.2 + m * 0.3;
-    img.data[i * 4] = 255 * (1 - dark * 0.92);
-    img.data[i * 4 + 1] = 255 * (1 - dark * 0.97);
-    img.data[i * 4 + 2] = 255 * (1 - dark);
+  // Two scales of contact shading: a tight line where things touch, and a wide soft dimming.
+  const k = 0.05;
+  const tight = new Mask(minX, minY, sizeX, sizeY, k);
+  stampContacts(plan, tight, true);
+  const wide = new Mask(minX, minY, sizeX, sizeY, k);
+  wide.data.set(tight.data);
+  blur(tight.data, tight.w, tight.h, 1);
+  blur(wide.data, wide.w, wide.h, 6);
+  const ao = document.createElement('canvas');
+  ao.width = tight.w;
+  ao.height = tight.h;
+  const actx = ao.getContext('2d')!;
+  const img = actx.createImageData(tight.w, tight.h);
+  for (let i = 0; i < tight.data.length; i++) {
+    const v = 1 - 0.36 * Math.min(1, tight.data[i] * 1.3) - 0.3 * Math.min(1, wide.data[i] * 1.2);
+    const g = Math.round(255 * Math.max(0, v));
+    img.data[i * 4] = img.data[i * 4 + 1] = img.data[i * 4 + 2] = g;
     img.data[i * 4 + 3] = 255;
   }
-  sctx.putImageData(img, 0, 0);
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.globalCompositeOperation = 'multiply';
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(shadeCanvas, 0, 0, canvas.width, canvas.height);
-  ctx.globalCompositeOperation = 'source-over';
+  actx.putImageData(img, 0, 0);
 
-  return { canvas, minX, minY, sizeX, sizeY };
+  return { canvas, ao, minX, minY, sizeX, sizeY };
 }
 
-/** A soft dark silhouette of the flat, laid on the ground under the model. */
+/**
+ * The model's footprint as seen by the table: red is a tight contact shadow
+ * hugging the slab, green a wide blur for the shadow the sun throws.
+ */
 export function bakeGroundShadow(plan: Plan): { canvas: HTMLCanvasElement; minX: number; minY: number; sizeX: number; sizeY: number } {
   const b = boundsOf(plan);
-  const pad = 3000;
+  const pad = 6000;
   const minX = b.minX - pad;
   const minY = b.minY - pad;
   const sizeX = b.maxX - b.minX + pad * 2;
   const sizeY = b.maxY - b.minY + pad * 2;
-  const k = 0.012;
-  const w = Math.ceil(sizeX * k);
-  const h = Math.ceil(sizeY * k);
-  const mask = new Float32Array(w * h);
-  const fill = (x0: number, y0: number, x1: number, y1: number) => {
-    for (let y = Math.floor((y0 - minY) * k); y <= Math.ceil((y1 - minY) * k); y++)
-      for (let x = Math.floor((x0 - minX) * k); x <= Math.ceil((x1 - minX) * k); x++) if (x >= 0 && y >= 0 && x < w && y < h) mask[y * w + x] = 1;
-  };
-  // The outline is rectilinear, so scanline-fill it row by row.
-  for (let y = 0; y < h; y++) {
-    const py = y / k + minY;
-    for (let x = 0; x < w; x++) {
-      const pxm = x / k + minX;
-      let inside = false;
-      const poly = plan.outline;
-      for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-        const [xi, yi] = poly[i];
-        const [xj, yj] = poly[j];
-        if (yi > py !== yj > py && pxm < ((xj - xi) * (py - yi)) / (yj - yi) + xi) inside = !inside;
-      }
-      if (inside) mask[y * w + x] = 1;
-    }
-  }
-  for (const s of plan.slabs) fill(s.rect[0], s.rect[1], s.rect[2], s.rect[3]);
-  blur(mask, w, h, 9);
+  const m = new Mask(minX, minY, sizeX, sizeY, 0.02);
+  m.fillPoly(plan.outline);
+  for (const s of plan.slabs) m.stamp((s.rect[0] + s.rect[2]) / 2, (s.rect[1] + s.rect[3]) / 2, 1, 0, (s.rect[2] - s.rect[0]) / 2, (s.rect[3] - s.rect[1]) / 2, 1);
+  const tight = m.data.slice();
+  blur(tight, m.w, m.h, 2);
+  blur(m.data, m.w, m.h, 11);
   const canvas = document.createElement('canvas');
-  canvas.width = w;
-  canvas.height = h;
+  canvas.width = m.w;
+  canvas.height = m.h;
   const ctx = canvas.getContext('2d')!;
-  const img = ctx.createImageData(w, h);
-  for (let i = 0; i < mask.length; i++) {
-    img.data[i * 4] = 40;
-    img.data[i * 4 + 1] = 32;
-    img.data[i * 4 + 2] = 24;
-    img.data[i * 4 + 3] = 255 * Math.min(1, mask[i]) * 0.34;
+  const img = ctx.createImageData(m.w, m.h);
+  for (let i = 0; i < m.data.length; i++) {
+    img.data[i * 4] = Math.round(255 * Math.min(1, tight[i]));
+    img.data[i * 4 + 1] = Math.round(255 * Math.min(1, m.data[i]));
+    img.data[i * 4 + 3] = 255;
   }
   ctx.putImageData(img, 0, 0);
   return { canvas, minX, minY, sizeX, sizeY };

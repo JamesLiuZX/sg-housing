@@ -12,10 +12,10 @@
 </script>
 
 <section class="poster" class:leaving class:wide bind:clientHeight={height} aria-label="Blk">
-  <p class="tag num" style="--i:0">TYPICAL 4-ROOM · 93 m²</p>
+  <p class="tag num" style="--i:0">TYPICAL 4-ROOM BTO · 93 m²</p>
   <h1 class="mark" style="--i:1" aria-label="Blk">BLK</h1>
   <p class="line" style="--i:2">A showflat for every flat.</p>
-  <p class="say" style="--i:3">Walk any HDB flat at true scale. See the real sun. Know which walls can go.</p>
+  <p class="say" style="--i:3">Walk it at true scale. See where the real sun falls. Know which walls can go.</p>
   <div class="go" style="--i:4">
     <button class="btn btn-primary" onclick={onstart} disabled={leaving}>
       Walk the 4-room
@@ -24,7 +24,7 @@
       </svg>
     </button>
   </div>
-  <p class="foot" style="--i:5">Typical 4-room BTO layout, about 93 m². Computer-generated model.</p>
+  <p class="foot" style="--i:5">Computer-generated model of a typical layout. Not affiliated with HDB.</p>
 </section>
 
 <style>
@@ -87,8 +87,10 @@
   }
   .foot {
     margin-top: 16px;
+    max-width: 44ch;
     font-size: 12px;
     color: var(--ink-2);
+    text-wrap: balance;
   }
 
   .poster.wide {

@@ -4,7 +4,8 @@ import { frameOf } from '../plan/geometry';
 import type { Plan, Wall } from '../plan/types';
 import type { PathPoint, Sun } from '../sg/solar';
 import { buildFlat, type Built, type RoomAnchor } from './build';
-import { PAL, col, makeUniforms } from './materials';
+import { BOUNCE_SCALE } from './field';
+import { PAL, col, cutTop, installToneMapping, makeUniforms, type Uniforms } from './materials';
 import { Nav, type P2 } from './nav';
 import { Tweens, clamp, ease, lerp, smooth } from './tween';
 
@@ -26,6 +27,38 @@ const EYE = 1.55;
 const BASE = 0.14;
 const DOLL_FOV = 30;
 const FACE_YAW = { N: 0, W: Math.PI / 2, S: Math.PI, E: -Math.PI / 2 } as const;
+
+/** Sun strength at full height. Strong against the sky light, so a patch on the floor is unmistakable. */
+const SUN = 11;
+/** Lamplight at night, against the field's lamp channel. */
+const LAMP = 4.2;
+/** Seconds for a wall to fold down or stand back up as the camera moves round. */
+const CUT_TIME = 0.4;
+/** Shadow-filter step in metres. The visible penumbra of a sun patch is about two and a half steps. */
+const SOFT_STEP = 0.016;
+
+/** Sun colour by altitude: warm white high up, amber low down, red at the horizon. Degrees, sRGB. */
+const SUN_STOPS: [number, number][] = [
+  [-1, 0xff6a2e],
+  [3, 0xff8a45],
+  [8, 0xffa865],
+  [16, 0xffc68a],
+  [28, 0xffdaae],
+  [45, 0xffe8cc],
+  [70, 0xfff1e0]
+];
+
+/** Fill from the side the model is first seen from, so faces at right angles read apart in the shade. */
+const FILL_DIR = new THREE.Vector3(Math.sin(25 * DEG) * Math.cos(50 * DEG), Math.sin(50 * DEG), Math.cos(25 * DEG) * Math.cos(50 * DEG));
+
+function sunColour(altitude: number, out: THREE.Color): THREE.Color {
+  const a = altitude / DEG;
+  let i = 0;
+  while (i < SUN_STOPS.length - 2 && a > SUN_STOPS[i + 1][0]) i++;
+  const [a0, c0] = SUN_STOPS[i];
+  const [a1, c1] = SUN_STOPS[i + 1];
+  return out.copy(col(c0)).lerp(col(c1), clamp((a - a0) / (a1 - a0), 0, 1));
+}
 
 function glowTexture(): THREE.Texture {
   const c = document.createElement('canvas');
@@ -74,15 +107,16 @@ export class Viewer {
   private controls: OrbitControls;
   private built: Built;
   private nav: Nav;
-  private u = makeUniforms();
+  private u: Uniforms;
   private tweens = new Tweens();
   private ray = new THREE.Raycaster();
 
   private sunLight = new THREE.DirectionalLight(0xffffff, 0);
   private hemi = new THREE.HemisphereLight(0xffffff, 0xffffff, 1);
   private fill = new THREE.DirectionalLight(0xffffff, 0.4);
-  private bulbs: THREE.PointLight[] = [];
-  private groundShadow: THREE.ShadowMaterial;
+  private shadowProbe = new THREE.OrthographicCamera();
+  /** Per wall, whether it should be cut down for the current camera. */
+  private cutWant: Float32Array;
 
   private compass = new THREE.Group();
   private compassMats: { mat: THREE.Material & { opacity: number }; base: number }[] = [];
@@ -126,7 +160,7 @@ export class Viewer {
   };
   private ptr: { id: number; x: number; y: number; lx: number; ly: number; t: number; moved: boolean } | null = null;
   private ring: THREE.Mesh;
-  private highlight: THREE.Group | null = null;
+  private highlight: { group: THREE.Group; wall: number; h: number } | null = null;
   private ro: ResizeObserver;
 
   constructor(canvas: HTMLCanvasElement, plan: Plan, hooks: Hooks = {}) {
@@ -139,12 +173,17 @@ export class Viewer {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     this.renderer.setClearColor(0x000000, 0);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
-    this.renderer.toneMapping = THREE.NeutralToneMapping;
-    this.renderer.toneMappingExposure = 1.02;
+    // Neutral tone mapping keeps paper white and timber timber; ours also lets direct sun bleach toward cream.
+    installToneMapping();
+    this.renderer.toneMapping = THREE.CustomToneMapping;
+    this.renderer.toneMappingExposure = 1;
     this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    // The plain PCF branch is the one the materials replace with their wide, smooth filter.
+    this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.shadowMap.autoUpdate = false;
 
+    this.u = makeUniforms(plan.walls.length, plan.height / 1000);
+    this.cutWant = new Float32Array(plan.walls.length);
     this.built = buildFlat(plan, this.u, this.renderer.capabilities.getMaxAnisotropy());
     this.anchors = this.built.anchors;
     this.scene.add(this.built.root);
@@ -155,38 +194,19 @@ export class Viewer {
     this.domeR = radius + 0.9;
     this.target.set(0, this.built.height * 0.3, 0);
 
-    // Light
+    // Light. Lamps and bounced sun come from the built light field rather than three's point
+    // lights, which would shine through walls and cost every surface on a phone.
     this.scene.add(this.hemi);
-    this.fill.position.set(-6, 9, 7);
+    this.fill.position.copy(FILL_DIR).multiplyScalar(20);
     this.scene.add(this.fill);
     const s = this.sunLight.shadow;
     const coarse = window.matchMedia?.('(pointer: coarse)').matches;
     s.mapSize.set(coarse ? 1536 : 2048, coarse ? 1536 : 2048);
-    const ext = radius * 1.25;
-    s.camera.left = -ext;
-    s.camera.right = ext;
-    s.camera.top = ext;
-    s.camera.bottom = -ext;
-    s.camera.near = 1;
-    s.camera.far = 120;
-    s.camera.updateProjectionMatrix();
-    s.bias = -0.0005;
-    s.normalBias = 0.03;
+    s.bias = -0.0003;
+    // Enough to lift a receiver clear of its own depth across the whole width of the soft filter.
+    s.normalBias = 0.024;
     this.sunLight.castShadow = true;
     this.scene.add(this.sunLight, this.sunLight.target);
-    for (const p of this.built.lights) {
-      const bulb = new THREE.PointLight(0xffd3a1, 0, 8.5, 1.5);
-      bulb.position.copy(p);
-      this.bulbs.push(bulb);
-      this.scene.add(bulb);
-    }
-
-    this.groundShadow = new THREE.ShadowMaterial({ opacity: 0.16 });
-    const ground = new THREE.Mesh(new THREE.PlaneGeometry(240, 240), this.groundShadow);
-    ground.rotation.x = -Math.PI / 2;
-    ground.position.y = -BASE;
-    ground.receiveShadow = true;
-    this.scene.add(ground);
 
     // Compass ring and sun dome, drawn in a frame where -Z is true north.
     const ink = 0x6b675f;
@@ -391,6 +411,8 @@ export class Viewer {
     const d1 = this.fit(to.theta, to.phi);
     this.pad = pad0;
     this.padX = padX0;
+    // Walls that will be cut for the finished view only ever rise to their stub.
+    this.stepCuts(0, to);
     void this.tweens.run('rise', 1.8, (k) => (this.u.uRise.value = k), { ease: ease.linear });
     void this.tweens.run(
       'camera',
@@ -442,6 +464,7 @@ export class Viewer {
     const to = this.dollAngles();
     const d = this.fit(to.theta, to.phi);
     this.setOrbit(to.theta, to.phi, d);
+    this.stepCuts(0, to);
     (this.built.caps.material as THREE.Material).transparent = false;
     (this.built.caps.material as THREE.Material).needsUpdate = true;
     this.mode = 'doll';
@@ -563,32 +586,99 @@ export class Viewer {
     pos.needsUpdate = true;
   }
 
+  /**
+   * One light model from dawn to night. The sun is the key and is strong, so
+   * its patches through the windows stand well clear of the sky light; the
+   * sky is a little cool and the bounce from the paper a little warm, so lit
+   * and shaded surfaces differ in hue as well as in value; after dark the
+   * lamps take over from the field, room by room.
+   */
   private applyLight(): void {
     const { azimuth, altitude } = this.sun;
     const c = Math.cos(altitude);
     const dir = new THREE.Vector3(Math.sin(azimuth) * c, Math.sin(altitude), -Math.cos(azimuth) * c).applyAxisAngle(UP, this.bearing * DEG);
     const day = smooth(-4 * DEG, 7 * DEG, altitude);
     const gold = 1 - smooth(4 * DEG, 32 * DEG, altitude);
+    const g = this.sunGain;
 
-    this.sunLight.position.copy(this.target).addScaledVector(dir, 55);
-    this.sunLight.target.position.copy(this.target);
-    this.sunLight.intensity = 3.6 * smooth(-1 * DEG, 10 * DEG, altitude) * (1 - 0.22 * gold) * this.sunGain;
-    this.sunLight.color.copy(col(0xfff2df)).lerp(col(0xff9248), Math.pow(gold, 1.6));
+    // Low sun crosses more air, so it is weaker as well as warmer.
+    const up = smooth(-1 * DEG, 12 * DEG, altitude);
+    this.sunLight.intensity = SUN * up * (0.7 + 0.3 * smooth(8 * DEG, 45 * DEG, altitude)) * g;
+    sunColour(altitude, this.sunLight.color);
+    this.fitShadow(dir);
 
-    const sky = col(0xf3f6fb).clone().lerp(col(0xfbe2cb), gold);
-    this.hemi.color.copy(col(0x39446a)).lerp(sky, day);
-    this.hemi.groundColor.copy(col(0x1b1e2a)).lerp(col(0xe9e1d3), day);
-    this.hemi.intensity = lerp(0.5, 1.75, day);
-    this.fill.intensity = 0.42 * day;
-    const night = 1 - day;
-    for (const b of this.bulbs) b.intensity = 26 * night * this.sunGain;
-    (this.built.lamps.material as THREE.MeshStandardMaterial).emissiveIntensity = 2.4 * night;
-    this.groundShadow.opacity = 0.17 * smooth(1 * DEG, 22 * DEG, altitude) * this.sunGain;
+    const warm = Math.pow(gold, 1.4);
+    const sky = col(0xe4ecf7).clone().lerp(col(0xf7d9bf), warm);
+    const ground = col(0xf2e8d8).clone().lerp(col(0xf1d2b2), warm);
+    this.hemi.color.copy(col(0x26304c)).lerp(sky, day);
+    this.hemi.groundColor.copy(col(0x10131c)).lerp(ground, day);
+    this.hemi.intensity = lerp(1.1, 2.3, day);
+    this.fill.color.copy(col(0x9fb0d4)).lerp(col(0xf2f5fb).clone().lerp(col(0xf6dcc4), warm), day);
+    this.fill.intensity = lerp(0.35, 0.8, day);
+
+    // Lights come on as the sun goes down, a little before it is dark.
+    const lamps = (1 - smooth(0.2, 0.85, day)) * g;
+    this.u.uLamp.value.copy(col(0xffc98c)).multiplyScalar(LAMP * lamps);
+    (this.built.lamps.material as THREE.MeshLambertMaterial).emissiveIntensity = 2.6 * lamps;
+    this.built.field.setSun(dir);
+    this.u.uBounce.value.copy(this.sunLight.color).multiplyScalar(this.sunLight.intensity / BOUNCE_SCALE);
+    this.u.uDay.value = day;
+
+    // The model's shadow on the table: always a soft contact line, plus a quiet cast shadow
+    // swept away from the sun that lengthens as it drops and fades before it gets absurd.
+    const t = this.built.table.uniforms;
+    const len = Math.min(4.5, 2.3 / Math.max(0.25, Math.tan(altitude)));
+    const hl = Math.hypot(dir.x, dir.z) || 1;
+    const size = this.built.tableSize;
+    t.uShift.value.set((-dir.x / hl) * (len / size.x), (dir.z / hl) * (len / size.y));
+    t.uCast.value = 0.17 * smooth(2 * DEG, 24 * DEG, altitude) * g;
+    t.uContact.value = lerp(0.12, 0.26, day);
 
     this.placeSunMarker();
     this.hooks.atmosphere?.(day, gold);
     this.shadowDirty = true;
     this.dirty = true;
+  }
+
+  /**
+   * Fits the sun's shadow camera tightly round the model as the sun sees it,
+   * so the map's texels are as small as they can be and the depth range is
+   * short enough for a millimetre-scale bias. The filter is set in metres, so
+   * the softness of a patch's edge does not change with the sun's angle.
+   */
+  private fitShadow(dir: THREE.Vector3): void {
+    const centre = new THREE.Vector3(0, this.built.height / 2, 0);
+    this.sunLight.position.copy(centre).addScaledVector(dir, 40);
+    this.sunLight.target.position.copy(centre);
+    const cam = this.sunLight.shadow.camera;
+    // Looking straight down, "up" must not be the view direction.
+    cam.up.set(0, 1, 0);
+    if (Math.abs(dir.y) > 0.92) cam.up.set(0, 0, -1);
+    const probe = this.shadowProbe;
+    probe.up.copy(cam.up);
+    probe.position.copy(this.sunLight.position);
+    probe.lookAt(centre);
+    probe.updateMatrixWorld();
+    const b = this.built.box;
+    const lo = new THREE.Vector3(Infinity, Infinity, Infinity);
+    const hi = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+    const p = new THREE.Vector3();
+    for (const x of [b.min.x - 0.2, b.max.x + 0.2])
+      for (const y of [-this.built.base, b.max.y + 0.1])
+        for (const z of [b.min.z - 0.2, b.max.z + 0.2]) {
+          p.set(x, y, z).applyMatrix4(probe.matrixWorldInverse);
+          lo.min(p);
+          hi.max(p);
+        }
+    cam.left = lo.x;
+    cam.right = hi.x;
+    cam.bottom = lo.y;
+    cam.top = hi.y;
+    cam.near = Math.max(0.1, -hi.z - 0.5);
+    cam.far = -lo.z + 0.5;
+    cam.updateProjectionMatrix();
+    const texel = Math.max(hi.x - lo.x, hi.y - lo.y) / this.sunLight.shadow.mapSize.x;
+    this.sunLight.shadow.radius = Math.max(1, SOFT_STEP / texel);
   }
 
   // ── Walking ───────────────────────────────────────────────────────────────
@@ -652,6 +742,8 @@ export class Viewer {
         this.pad = lerp(pad0, 0, k);
         this.applyView();
         this.setShell(smooth(0.62, 0.97, k));
+        // Under the ceiling the sky reaches a room only through its windows.
+        this.u.uInside.value = smooth(0.5, 1, k);
       },
       { ease: ease.inOutQuart }
     );
@@ -683,6 +775,7 @@ export class Viewer {
         this.camera.fov = lerp(f0, DOLL_FOV, k);
         this.applyView();
         this.setShell(1 - smooth(0.05, 0.4, k));
+        this.u.uInside.value = 1 - smooth(0.05, 0.5, k);
       },
       { ease: ease.inOutQuart }
     );
@@ -824,11 +917,14 @@ export class Viewer {
     this.ray.setFromCamera(new THREE.Vector2(((clientX - r.left) / r.width) * 2 - 1, -((clientY - r.top) / r.height) * 2 + 1), this.camera);
   }
 
+  /** How tall a wall is drawn right now, metres, with any cut applied. */
+  private wallTop = (i: number): number => cutTop(this.u.uCut.value[i], this.u.uCutSpan.value);
+
   private tap(clientX: number, clientY: number): void {
     if (this.flying) return;
     this.aim(clientX, clientY);
     if (this.mode === 'walk') {
-      const hitWall = this.ray.intersectObject(this.built.walls, false)[0];
+      const hitWall = this.built.pick(this.ray.ray, this.wallTop);
       const o = this.ray.ray.origin;
       const d = this.ray.ray.direction;
       let point: THREE.Vector3 | null = null;
@@ -839,11 +935,8 @@ export class Viewer {
       return;
     }
     if (this.mode === 'doll' && this.lens === 'rules') {
-      const hits = this.ray.intersectObjects([this.built.walls, this.built.caps], false);
-      const hit = hits[0];
-      if (!hit || hit.faceIndex == null) return this.select(null);
-      const owner = hit.object === this.built.walls ? this.built.wallOfFace : this.built.capOfFace;
-      const wall = this.plan.walls[owner[hit.faceIndex]];
+      const hit = this.built.pick(this.ray.ray, this.wallTop);
+      const wall = hit ? this.plan.walls[hit.wall] : null;
       this.select(wall && wall.kind !== 'parapet' ? wall : null);
     }
   }
@@ -851,26 +944,38 @@ export class Viewer {
   /** Marks a wall as chosen and tells the interface. */
   select(wall: Wall | null): void {
     if (this.highlight) {
-      this.scene.remove(this.highlight);
-      this.highlight.traverse((o) => (o as THREE.Mesh).geometry?.dispose());
+      this.scene.remove(this.highlight.group);
+      this.highlight.group.traverse((o) => {
+        const m = o as THREE.Mesh;
+        m.geometry?.dispose();
+        (m.material as THREE.Material | undefined)?.dispose();
+      });
       this.highlight = null;
     }
     if (wall) {
       const f = frameOf(wall);
       const wh = (wall.h ?? this.plan.height) / 1000;
-      const geo = new THREE.BoxGeometry((f.len + wall.t) / 1000 + 0.02, wh + 0.03, wall.t / 1000 + 0.05);
+      // A unit-high box on the floor, scaled each frame to the wall as it is drawn, cut or not.
+      const geo = new THREE.BoxGeometry((f.len + wall.t) / 1000 + 0.03, 1, wall.t / 1000 + 0.04).translate(0, 0.5, 0);
       const g = new THREE.Group();
-      g.add(new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.3, depthWrite: false })));
-      g.add(new THREE.LineSegments(new THREE.EdgesGeometry(geo), new THREE.LineBasicMaterial({ color: 0x1c1d20 })));
+      g.add(new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.32, depthWrite: false })));
+      g.add(new THREE.LineSegments(new THREE.EdgesGeometry(geo), new THREE.LineBasicMaterial({ color: 0x1c1d20, transparent: true, opacity: 0.9 })));
       const [x, z] = this.built.toWorld((wall.a[0] + wall.b[0]) / 2, (wall.a[1] + wall.b[1]) / 2);
-      g.position.set(x, wh / 2, z);
+      g.position.set(x, -0.005, z);
       g.rotation.y = -Math.atan2(f.dy, f.dx);
       g.renderOrder = 4;
       this.scene.add(g);
-      this.highlight = g;
+      this.highlight = { group: g, wall: this.plan.walls.indexOf(wall), h: wh };
+      this.fitHighlight();
     }
     this.dirty = true;
     this.hooks.wall?.(wall);
+  }
+
+  private fitHighlight(): void {
+    const hl = this.highlight;
+    if (!hl) return;
+    hl.group.scale.y = Math.min(hl.h, this.wallTop(hl.wall)) + 0.025;
   }
 
   // ── Overlay support ───────────────────────────────────────────────────────
@@ -881,6 +986,53 @@ export class Viewer {
     out.x = (p.x * 0.5 + 0.5) * this.w;
     out.y = (-p.y * 0.5 + 0.5) * this.h;
     out.front = p.z < 1;
+  }
+
+  // ── Cutting walls away ────────────────────────────────────────────────────
+
+  /**
+   * Walls between the camera and the rooms fold down to a stub, the way a
+   * sectional model is cut: perimeter walls on the near side, and the inside
+   * walls that face the camera most squarely. The others stand, so the rooms
+   * keep their shape. Shadows still come from every wall at full height, so
+   * the sun on the floor stays true. With an orbit given, the cut for that
+   * view is applied at once. Returns whether anything moved.
+   */
+  private stepCuts(dt: number, orbit?: { theta: number; phi: number }): boolean {
+    let cx: number;
+    let cz: number;
+    let steep: number;
+    if (orbit) {
+      cx = Math.sin(orbit.theta);
+      cz = Math.cos(orbit.theta);
+      steep = Math.sin(orbit.phi);
+    } else {
+      const f = this.camera.getWorldDirection(new THREE.Vector3());
+      steep = Math.hypot(f.x, f.z);
+      cx = -f.x / (steep || 1);
+      cz = -f.z / (steep || 1);
+    }
+    const active = !!orbit || this.mode === 'doll';
+    const cut = this.u.uCut.value;
+    let moved = false;
+    this.built.cuts.forEach((w, i) => {
+      const on = this.cutWant[i] > 0.5;
+      let want = 0;
+      // Looking almost straight down, nothing needs cutting.
+      if (active && w.cuttable && steep > 0.3) {
+        const facing = w.nx * cx + w.nz * cz;
+        // Thresholds differ by state, so a wall seen at 45° does not flutter.
+        if (w.out !== 0) want = w.out * facing > (on ? 0.1 : 0.22) ? 1 : 0;
+        else want = Math.abs(facing) > (on ? 0.68 : 0.74) ? 1 : 0;
+      }
+      this.cutWant[i] = want;
+      const now = cut[i];
+      if (now === want) return;
+      cut[i] = orbit ? want : want > now ? Math.min(1, now + dt / CUT_TIME) : Math.max(0, now - dt / CUT_TIME);
+      moved = true;
+    });
+    if (moved) this.fitHighlight();
+    return moved;
   }
 
   // ── Loop ──────────────────────────────────────────────────────────────────
@@ -897,6 +1049,7 @@ export class Viewer {
     }
     if (this.mode === 'walk' && !this.flying) this.stepWalk(dt);
     else if (this.orbitLive) this.controls.update();
+    if (!this.introRunning && this.stepCuts(dt)) this.dirty = true;
     if (!this.dirty) return;
     this.dirty = false;
     if (this.shadowDirty) {

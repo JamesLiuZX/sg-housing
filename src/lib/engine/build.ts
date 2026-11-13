@@ -1,9 +1,10 @@
 import * as THREE from 'three';
-import { boundsOf, centroid, clearAreaSqm, frameOf, offsetPoly, openingsOf } from '../plan/geometry';
-import type { Opening, Plan, Pt, Wall, WallKind } from '../plan/types';
+import { boundsOf, centroid, clearAreaSqm, frameOf, offsetPoly, openingsOf, pointInPoly, solidSpans, wallOnEdge } from '../plan/geometry';
+import type { Item, Opening, Plan, Pt, Wall, WallKind } from '../plan/types';
+import { buildField, type LightField } from './field';
 import { bakeFloor, bakeGroundShadow } from './floorTexture';
 import { furnish } from './furniture';
-import { PAL, col, depthFor, floorMaterial, popMaterial, riseMaterial, type Uniforms } from './materials';
+import { PAL, col, depthFor, shade, tableMaterial, type Uniforms } from './materials';
 import { Kit } from './mesh';
 
 export interface RoomAnchor {
@@ -13,25 +14,51 @@ export interface RoomAnchor {
   pos: THREE.Vector3;
 }
 
+/** What the viewer needs to decide which walls to cut down for the camera. */
+export interface WallCut {
+  /** Centre of the wall and its left normal, world. */
+  x: number;
+  z: number;
+  nx: number;
+  nz: number;
+  /** For walls on the outline, which side of the normal is outdoors (+1 or -1). 0 for walls inside. */
+  out: number;
+  /** Parapets are low already and stay as they are. */
+  cuttable: boolean;
+}
+
+export interface WallHit {
+  wall: number;
+  distance: number;
+  point: THREE.Vector3;
+}
+
 export interface Built {
   root: THREE.Group;
   walls: THREE.Mesh;
   caps: THREE.Mesh;
-  /** Wall above door heads and the ceiling: only seen from inside. */
+  /** Walls above door heads and the ceiling: seen only from inside, but always casting shadow. */
   shell: THREE.Mesh[];
   furniture: THREE.Object3D[];
   lamps: THREE.Mesh;
-  /** Triangle index → wall index, for picking. */
-  wallOfFace: Int32Array;
-  capOfFace: Int32Array;
   anchors: RoomAnchor[];
-  lights: THREE.Vector3[];
+  cuts: WallCut[];
+  field: LightField;
+  table: THREE.ShaderMaterial;
+  /** World size of the table shadow image, metres. */
+  tableSize: THREE.Vector2;
   box: THREE.Box3;
   height: number;
+  /** Thickness of the slab the model stands on, metres. */
+  base: number;
   toWorld: (x: number, y: number) => [number, number];
   entry: THREE.Vector3;
+  /** The first wall a ray meets, given how tall each wall stands right now. */
+  pick: (ray: THREE.Ray, top: (wall: number) => number) => WallHit | null;
   dispose: () => void;
 }
+
+const BASE = 0.14;
 
 const RULE_COLOUR: Record<WallKind, number> = {
   external: PAL.ruleNo,
@@ -41,41 +68,52 @@ const RULE_COLOUR: Record<WallKind, number> = {
   parapet: PAL.capParapet
 };
 
+/** How far each kind of section cap sits above its wall, so where walls overlap the stronger one is drawn. */
+const CAP_LIFT: Record<WallKind, number> = { partition: 0.003, external: 0.005, structural: 0.005, shelter: 0.007, parapet: 0.002 };
+
 /** Hand-rolled quad buffer with the extra per-vertex data the wall shaders need. */
 class Quads {
-  pos: number[] = [];
-  nor: number[] = [];
-  rgb: number[] = [];
-  rule: number[] = [];
-  delay: number[] = [];
-  idx: number[] = [];
-  owner: number[] = [];
+  private pos: number[] = [];
+  private nor: number[] = [];
+  private rgb: number[] = [];
+  private rule: number[] = [];
+  private delay: number[] = [];
+  private wall: number[] = [];
+  private lift: number[] = [];
+  private plan: number[] = [];
+  private idx: number[] = [];
 
-  quad(p: THREE.Vector3[], n: THREE.Vector3, colours: THREE.Color[], rule: THREE.Color, delay: number, owner: number): void {
+  quad(p: THREE.Vector3[], n: THREE.Vector3, c: THREE.Color, rule: THREE.Color, delay: number, wall: number, lift = 0, planOnly = 0): void {
     const base = this.pos.length / 3;
     // Keep the winding consistent with the stated normal so back faces cull correctly.
     const e1 = p[1].clone().sub(p[0]);
     const e2 = p[2].clone().sub(p[0]);
-    const flip = e1.cross(e2).dot(n) < 0;
-    const order = flip ? [0, 3, 2, 1] : [0, 1, 2, 3];
+    const order = e1.cross(e2).dot(n) < 0 ? [0, 3, 2, 1] : [0, 1, 2, 3];
     for (const i of order) {
       this.pos.push(p[i].x, p[i].y, p[i].z);
       this.nor.push(n.x, n.y, n.z);
-      this.rgb.push(colours[i].r, colours[i].g, colours[i].b);
+      this.rgb.push(c.r, c.g, c.b);
       this.rule.push(rule.r, rule.g, rule.b);
       this.delay.push(delay);
+      this.wall.push(wall);
+      this.lift.push(lift);
+      this.plan.push(planOnly);
     }
     this.idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
-    this.owner.push(owner, owner);
   }
 
-  build(): THREE.BufferGeometry {
+  build(caps = false): THREE.BufferGeometry {
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute(this.pos, 3));
     g.setAttribute('normal', new THREE.Float32BufferAttribute(this.nor, 3));
     g.setAttribute('color', new THREE.Float32BufferAttribute(this.rgb, 3));
     g.setAttribute('aRule', new THREE.Float32BufferAttribute(this.rule, 3));
     g.setAttribute('aDelay', new THREE.Float32BufferAttribute(this.delay, 1));
+    g.setAttribute('aWall', new THREE.Float32BufferAttribute(this.wall, 1));
+    if (caps) {
+      g.setAttribute('aLift', new THREE.Float32BufferAttribute(this.lift, 1));
+      g.setAttribute('aPlan', new THREE.Float32BufferAttribute(this.plan, 1));
+    }
     g.setIndex(this.idx);
     g.computeBoundingSphere();
     return g;
@@ -104,6 +142,10 @@ export function buildFlat(plan: Plan, u: Uniforms, maxAniso: number): Built {
   const reach = Math.max(...plan.outline.map((p) => Math.hypot(p[0] - plan.entry.x, p[1] - plan.entry.y)));
   const delayOf = (x: number, y: number) => Math.min(1, Math.hypot(x - plan.entry.x, y - plan.entry.y) / reach);
 
+  const field = buildField(plan, toWorld);
+  u.uField.value = field.texture;
+  u.uFieldRect.value.copy(field.rect);
+
   // ── Walls ────────────────────────────────────────────────────────────────
   const wallQ = new Quads();
   const capQ = new Quads();
@@ -111,7 +153,7 @@ export function buildFlat(plan: Plan, u: Uniforms, maxAniso: number): Built {
   const UP = new THREE.Vector3(0, 1, 0);
   const DOWN = new THREE.Vector3(0, -1, 0);
   const white = col(PAL.wall);
-  const shaded = col(PAL.wallBase);
+  const planInk = col(PAL.planLine);
 
   plan.walls.forEach((wall, wi) => {
     const f = frameOf(wall);
@@ -119,7 +161,8 @@ export function buildFlat(plan: Plan, u: Uniforms, maxAniso: number): Built {
     const half = wall.t / 2;
     const delay = delayOf((wall.a[0] + wall.b[0]) / 2, (wall.a[1] + wall.b[1]) / 2);
     const rule = col(ruleColour(wall));
-    const capLift = wall.kind === 'partition' ? 0 : wall.kind === 'shelter' ? 0.004 : 0.002;
+    const lift = CAP_LIFT[wall.kind];
+    /** A point in the wall's frame: u along it from `a`, v across it toward the left normal, mm; y in metres. */
     const at = (uu: number, v: number, y: number) => {
       const [x, z] = toWorld(wall.a[0] + f.dx * uu + f.nx * v, wall.a[1] + f.dy * uu + f.ny * v);
       return new THREE.Vector3(x, y, z);
@@ -128,26 +171,19 @@ export function buildFlat(plan: Plan, u: Uniforms, maxAniso: number): Built {
     const nOut = nIn.clone().negate();
     const dFwd = new THREE.Vector3(f.dx, 0, f.dy);
     const dBack = dFwd.clone().negate();
+    /** A flat mark lying on the cap or the floor: a strip from u0 to u1 between v0 and v1. */
+    const mark = (u0: number, u1: number, v0: number, v1: number, y: number, c: THREE.Color, markLift: number, planOnly: number) =>
+      capQ.quad([at(u0, v0, y), at(u1, v0, y), at(u1, v1, y), at(u0, v1, y)], UP, c, wall.kind === 'parapet' ? c : rule, delay, wi, markLift, planOnly);
 
     const block = (u0: number, u1: number, y0: number, y1: number, into: Quads, capHex: number | null) => {
       const lo = y0 <= 0 ? -0.04 : y0;
-      const cLo = y0 <= 0 ? shaded : white;
-      const cs = [cLo, cLo, white, white];
-      into.quad([at(u0, half, lo), at(u1, half, lo), at(u1, half, y1), at(u0, half, y1)], nIn, cs, rule, delay, wi);
-      into.quad([at(u0, -half, lo), at(u1, -half, lo), at(u1, -half, y1), at(u0, -half, y1)], nOut, cs, rule, delay, wi);
-      into.quad([at(u0, -half, lo), at(u0, half, lo), at(u0, half, y1), at(u0, -half, y1)], dBack, cs, rule, delay, wi);
-      into.quad([at(u1, -half, lo), at(u1, half, lo), at(u1, half, y1), at(u1, -half, y1)], dFwd, cs, rule, delay, wi);
-      if (y0 > 0) {
-        into.quad([at(u0, -half, y0), at(u1, -half, y0), at(u1, half, y0), at(u0, half, y0)], DOWN, [white, white, white, white], rule, delay, wi);
-      }
-      const top = [at(u0, -half, y1), at(u1, -half, y1), at(u1, half, y1), at(u0, half, y1)];
-      if (capHex === null) {
-        into.quad(top, UP, [white, white, white, white], rule, delay, wi);
-      } else {
-        for (const p of top) p.y += capLift;
-        const c = col(capHex);
-        capQ.quad(top, UP, [c, c, c, c], wall.kind === 'parapet' ? c : rule, delay, wi);
-      }
+      into.quad([at(u0, half, lo), at(u1, half, lo), at(u1, half, y1), at(u0, half, y1)], nIn, white, rule, delay, wi);
+      into.quad([at(u0, -half, lo), at(u1, -half, lo), at(u1, -half, y1), at(u0, -half, y1)], nOut, white, rule, delay, wi);
+      into.quad([at(u0, -half, lo), at(u0, half, lo), at(u0, half, y1), at(u0, -half, y1)], dBack, white, rule, delay, wi);
+      into.quad([at(u1, -half, lo), at(u1, half, lo), at(u1, half, y1), at(u1, -half, y1)], dFwd, white, rule, delay, wi);
+      if (y0 > 0) into.quad([at(u0, -half, y0), at(u1, -half, y0), at(u1, half, y0), at(u0, half, y0)], DOWN, white, rule, delay, wi);
+      if (capHex === null) into.quad([at(u0, -half, y1), at(u1, -half, y1), at(u1, half, y1), at(u0, half, y1)], UP, white, rule, delay, wi);
+      else mark(u0, u1, -half, half, y1, col(capHex), lift, 0);
     };
 
     let cursor = -half;
@@ -158,8 +194,11 @@ export function buildFlat(plan: Plan, u: Uniforms, maxAniso: number): Built {
       if (o.type === 'window') {
         if (sill > 0) block(o.at, o.at + o.w, 0, sill, wallQ, null);
         if (head < wh) block(o.at, o.at + o.w, head, wh, wallQ, capColour(wall, true));
-      } else if (o.type === 'door' && head < wh) {
-        block(o.at, o.at + o.w, head, wh - 0.002, headQ, null);
+        // The glazing line of the plan symbol, kept on the cap.
+        mark(o.at + 40, o.at + o.w - 40, -9, 9, wh, col(0x5f8293), lift + 0.0015, 0);
+      } else if (o.type === 'door') {
+        if (head < wh) block(o.at, o.at + o.w, head, wh - 0.002, headQ, null);
+        doorSymbol(o, wall.t, (pts) => capQ.quad(pts.map(([uu, v]) => at(uu, v, 0)), UP, planInk, planInk, delay, wi, 0.004, 1));
       }
       cursor = o.at + o.w;
     }
@@ -167,51 +206,65 @@ export function buildFlat(plan: Plan, u: Uniforms, maxAniso: number): Built {
     if (end > cursor) block(cursor, end, 0, wh, wallQ, capColour(wall, false));
   });
 
-  const wallMat = riseMaterial(new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95, metalness: 0 }), u, { rule: 0.82 });
-  const walls = new THREE.Mesh(wallQ.build(), wallMat);
+  const walls = new THREE.Mesh(
+    wallQ.build(),
+    shade(new THREE.MeshLambertMaterial({ vertexColors: true }), u, { rise: true, fold: true, rule: 0.82, field: true, foot: 0.5, soft: true })
+  );
   walls.castShadow = true;
   walls.receiveShadow = true;
   walls.customDepthMaterial = depthFor('rise', u);
   root.add(walls);
 
-  const capMat = riseMaterial(new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true }), u, { rule: 1, draw: true });
-  const caps = new THREE.Mesh(capQ.build(), capMat);
+  const caps = new THREE.Mesh(capQ.build(true), shade(new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true }), u, { rise: true, fold: true, cap: true, rule: 1 }));
   caps.renderOrder = 2;
   root.add(caps);
 
-  const headMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95, transparent: true, opacity: 0 });
-  const heads = new THREE.Mesh(headQ.build(), headMat);
+  // Door heads are hidden in the dollhouse so doorways read from above, but they always cast
+  // their shadow: without it the sun would slip into a room over the top of every door.
+  const heads = new THREE.Mesh(
+    headQ.build(),
+    shade(new THREE.MeshLambertMaterial({ vertexColors: true, transparent: true, opacity: 0 }), u, { rise: true, fold: true, field: true, soft: true })
+  );
+  heads.castShadow = true;
   heads.receiveShadow = true;
-  heads.visible = false;
+  heads.customDepthMaterial = depthFor('rise', u);
   root.add(heads);
 
   // ── Windows and doors ────────────────────────────────────────────────────
   const fit = new Kit();
-  for (const wall of plan.walls) {
+  plan.walls.forEach((wall, wi) => {
     const f = frameOf(wall);
     const theta = Math.atan2(f.dy, f.dx);
     for (const o of openingsOf(plan, wall.id)) {
       const [x, z] = toWorld(wall.a[0] + f.dx * o.at, wall.a[1] + f.dy * o.at);
       const w = o.w / 1000;
       const delay = delayOf(wall.a[0] + f.dx * (o.at + o.w / 2), wall.a[1] + f.dy * (o.at + o.w / 2));
-      fit.place(x, z, -theta, delay, () => {
-        if (o.type === 'window') windowUnit(fit, w, (o.sill ?? 0) / 1000, (o.head ?? plan.height) / 1000);
-        else if (o.type === 'door') doorUnit(fit, o, w, wall.t / 1000);
-      });
+      fit.place(
+        x,
+        z,
+        -theta,
+        delay,
+        () => {
+          if (o.type === 'window') windowUnit(fit, w, (o.sill ?? 0) / 1000, (o.head ?? plan.height) / 1000);
+          else if (o.type === 'door') doorUnit(fit, o, w, wall.t / 1000);
+        },
+        { wall: wi }
+      );
     }
-  }
-  const fitMat = riseMaterial(new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.8, metalness: 0 }), u);
-  const fittings = new THREE.Mesh(fit.solid.build(), fitMat);
+  });
+  const fittings = new THREE.Mesh(
+    fit.solid.build(),
+    shade(new THREE.MeshLambertMaterial({ vertexColors: true }), u, { rise: true, fold: true, field: true, soft: true })
+  );
   fittings.castShadow = true;
   fittings.receiveShadow = true;
   fittings.customDepthMaterial = depthFor('rise', u);
   root.add(fittings);
 
-  const glassMat = riseMaterial(
-    new THREE.MeshStandardMaterial({ color: PAL.glass, transparent: true, opacity: 0.26, roughness: 0.08, metalness: 0, depthWrite: false, side: THREE.DoubleSide }),
-    u
+  const glass = new THREE.Mesh(
+    fit.glass.build(),
+    shade(new THREE.MeshLambertMaterial({ color: PAL.glass, transparent: true, depthWrite: false, side: THREE.DoubleSide }), u, { rise: true, fold: true, glass: true })
   );
-  const glass = new THREE.Mesh(fit.glass.build(), glassMat);
   glass.renderOrder = 3;
   root.add(glass);
 
@@ -220,11 +273,17 @@ export function buildFlat(plan: Plan, u: Uniforms, maxAniso: number): Built {
   const tex = new THREE.CanvasTexture(bake.canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.anisotropy = maxAniso;
+  const aoTex = new THREE.CanvasTexture(bake.ao);
   const [rx, rz] = toWorld(bake.minX, bake.minY);
   const rect = new THREE.Vector4(rx, rz, bake.sizeX / 1000, bake.sizeY / 1000);
   const [ex, ez] = toWorld(plan.entry.x, plan.entry.y);
 
-  const outer = offsetPoly(plan.outline, -100);
+  // The slab follows the outer face of each wall on the outline, however thick it is.
+  const ring = plan.outline;
+  const outer = offsetPoly(
+    ring,
+    ring.map((p, i) => -(wallOnEdge(plan, p, ring[(i + 1) % ring.length])?.t ?? 0) / 2)
+  );
   const slabPolys: Pt[][] = plan.slabs.map((s) => [
     [s.rect[0], s.rect[1]],
     [s.rect[2], s.rect[1]],
@@ -267,14 +326,16 @@ export function buildFlat(plan: Plan, u: Uniforms, maxAniso: number): Built {
     return g;
   };
 
-  const floorMat = floorMaterial(tex, u, rect, new THREE.Vector2(ex, ez), reach / 1000);
-  floorMat.side = THREE.DoubleSide;
+  const floorMat = shade(new THREE.MeshLambertMaterial({ map: tex, aoMap: aoTex }), u, {
+    field: true,
+    soft: true,
+    reveal: { rect, origin: new THREE.Vector2(ex, ez), reach: reach / 1000 }
+  });
   const floor = new THREE.Mesh(flat(floorPolys, 0, true), floorMat);
   floor.receiveShadow = true;
   root.add(floor);
 
   // The slab edge, so the model sits on the table like a cut section.
-  const BASE = 0.14;
   const edgeQ = new Quads();
   const edgeCol = col(PAL.slabEdge);
   for (const poly of floorPolys) {
@@ -287,20 +348,24 @@ export function buildFlat(plan: Plan, u: Uniforms, maxAniso: number): Built {
       edgeQ.quad(
         [new THREE.Vector3(x0, -BASE, z0), new THREE.Vector3(x1, -BASE, z1), new THREE.Vector3(x1, 0, z1), new THREE.Vector3(x0, 0, z0)],
         n,
-        [edgeCol, edgeCol, edgeCol, edgeCol],
+        edgeCol,
         edgeCol,
         0,
-        -1
+        0
       );
     }
   }
-  const edge = new THREE.Mesh(edgeQ.build(), new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1, side: THREE.DoubleSide }));
+  const edge = new THREE.Mesh(edgeQ.build(), shade(new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide }), u, { soft: true }));
   edge.castShadow = true;
+  edge.receiveShadow = true;
   root.add(edge);
 
-  const ceilMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1, side: THREE.DoubleSide, transparent: true, opacity: 0 });
+  // The ceiling faces down, so from above it is culled before it costs anything; it still
+  // casts from both sides, which is what keeps the sun to the windows.
+  const ceilMat = shade(new THREE.MeshLambertMaterial({ color: 0xfbfaf6, transparent: true, opacity: 0 }), u, { field: true });
   ceilMat.colorWrite = false;
   ceilMat.depthWrite = false;
+  ceilMat.shadowSide = THREE.DoubleSide;
   const ceiling = new THREE.Mesh(flat(floorPolys, H - 0.004, false, 60), ceilMat);
   ceiling.castShadow = true;
   root.add(ceiling);
@@ -309,20 +374,36 @@ export function buildFlat(plan: Plan, u: Uniforms, maxAniso: number): Built {
   const gs = bakeGroundShadow(plan);
   const gTex = new THREE.CanvasTexture(gs.canvas);
   const [gx, gz] = toWorld(gs.minX + gs.sizeX / 2, gs.minY + gs.sizeY / 2);
-  const ground = new THREE.Mesh(
-    new THREE.PlaneGeometry(gs.sizeX / 1000, gs.sizeY / 1000),
-    new THREE.MeshBasicMaterial({ map: gTex, transparent: true, depthWrite: false })
-  );
+  const table = tableMaterial(gTex);
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(gs.sizeX / 1000, gs.sizeY / 1000), table);
   ground.rotation.x = -Math.PI / 2;
-  ground.position.set(gx, -BASE + 0.002, gz);
+  ground.position.set(gx, -BASE + 0.001, gz);
   ground.renderOrder = -1;
   root.add(ground);
 
   // ── Furniture ────────────────────────────────────────────────────────────
+  const wallOf = (it: Item) => {
+    let best = -1;
+    let bestD = Infinity;
+    plan.walls.forEach((w, i) => {
+      const f = frameOf(w);
+      const rx = it.x - w.a[0];
+      const ry = it.y - w.a[1];
+      const along = rx * f.dx + ry * f.dy;
+      const off = Math.abs(rx * f.nx + ry * f.ny);
+      if (along > -50 && along < f.len + 50 && off < bestD) {
+        bestD = off;
+        best = i;
+      }
+    });
+    return best;
+  };
   const kit = new Kit();
-  furnish(kit, plan.items, toWorld, delayOf);
-  const furnMat = popMaterial(new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.88, metalness: 0 }), u);
-  const furn = new THREE.Mesh(kit.solid.build(), furnMat);
+  furnish(kit, plan.items, toWorld, delayOf, wallOf);
+  const furn = new THREE.Mesh(
+    kit.solid.build(),
+    shade(new THREE.MeshLambertMaterial({ vertexColors: true }), u, { pop: true, fold: true, field: true, foot: 0.14, soft: true })
+  );
   furn.castShadow = true;
   furn.receiveShadow = true;
   furn.customDepthMaterial = depthFor('pop', u);
@@ -330,21 +411,20 @@ export function buildFlat(plan: Plan, u: Uniforms, maxAniso: number): Built {
 
   const furnGlass = new THREE.Mesh(
     kit.glass.build(),
-    popMaterial(new THREE.MeshStandardMaterial({ color: PAL.glass, transparent: true, opacity: 0.3, roughness: 0.08, depthWrite: false, side: THREE.DoubleSide }), u)
+    shade(new THREE.MeshLambertMaterial({ color: PAL.glass, transparent: true, depthWrite: false, side: THREE.DoubleSide }), u, { pop: true, glass: true })
   );
   furnGlass.renderOrder = 3;
   root.add(furnGlass);
 
-  const lampMat = popMaterial(
-    new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.7, emissive: 0xffc27a, emissiveIntensity: 0 }),
-    u
+  const lamps = new THREE.Mesh(
+    kit.lamp.build(),
+    shade(new THREE.MeshLambertMaterial({ vertexColors: true, emissive: 0xffc27a, emissiveIntensity: 0 }), u, { pop: true, field: true })
   );
-  const lamps = new THREE.Mesh(kit.lamp.build(), lampMat);
   lamps.castShadow = true;
   lamps.customDepthMaterial = depthFor('pop', u);
   root.add(lamps);
 
-  // ── Anchors ──────────────────────────────────────────────────────────────
+  // ── Anchors and cuts ─────────────────────────────────────────────────────
   const anchors: RoomAnchor[] = plan.rooms
     .filter((r) => !r.quiet)
     .map((r) => {
@@ -353,10 +433,49 @@ export function buildFlat(plan: Plan, u: Uniforms, maxAniso: number): Built {
       return { id: r.id, name: r.name, areaSqm: clearAreaSqm(plan, r), pos: new THREE.Vector3(x, 0.02, z) };
     });
 
-  const lights = plan.lights.map(([lx, ly]) => {
-    const [x, z] = toWorld(lx, ly);
-    return new THREE.Vector3(x, H - 0.35, z);
+  const cuts: WallCut[] = plan.walls.map((w) => {
+    const f = frameOf(w);
+    const mx = (w.a[0] + w.b[0]) / 2;
+    const my = (w.a[1] + w.b[1]) / 2;
+    const probe = w.t / 2 + 250;
+    const left = pointInPoly(mx + f.nx * probe, my + f.ny * probe, plan.outline);
+    const right = pointInPoly(mx - f.nx * probe, my - f.ny * probe, plan.outline);
+    const [x, z] = toWorld(mx, my);
+    return { x, z, nx: f.nx, nz: f.ny, out: left && right ? 0 : left ? -1 : 1, cuttable: w.kind !== 'parapet' && (left || right) };
   });
+
+  // Picking works on the plan rather than the meshes, so a cut wall is only as tall as it is drawn.
+  const solid = plan.walls.map((w) => ({ w, f: frameOf(w), spans: solidSpans(plan, w), h: (w.h ?? plan.height) / 1000 }));
+  const pick = (ray: THREE.Ray, top: (wall: number) => number): WallHit | null => {
+    let best: WallHit | null = null;
+    solid.forEach(({ w, f, spans, h }, i) => {
+      const [ax, az] = toWorld(w.a[0], w.a[1]);
+      const ox = ray.origin.x - ax;
+      const oz = ray.origin.z - az;
+      // The ray in the wall's own frame: along, across, up.
+      const o = [(ox * f.dx + oz * f.dy) * 1000, (ox * f.nx + oz * f.ny) * 1000, ray.origin.y];
+      const d = [(ray.direction.x * f.dx + ray.direction.z * f.dy) * 1000, (ray.direction.x * f.nx + ray.direction.z * f.ny) * 1000, ray.direction.y];
+      const hi = Math.min(h, top(i));
+      for (const [u0, u1] of spans) {
+        const lo3 = [u0, -w.t / 2, 0];
+        const hi3 = [u1, w.t / 2, hi];
+        let t0 = 0;
+        let t1 = Infinity;
+        for (let k = 0; k < 3; k++) {
+          if (Math.abs(d[k]) < 1e-9) {
+            if (o[k] < lo3[k] || o[k] > hi3[k]) t1 = -1;
+            continue;
+          }
+          const ta = (lo3[k] - o[k]) / d[k];
+          const tb = (hi3[k] - o[k]) / d[k];
+          t0 = Math.max(t0, Math.min(ta, tb));
+          t1 = Math.min(t1, Math.max(ta, tb));
+        }
+        if (t1 >= t0 && t0 > 0 && (!best || t0 < best.distance)) best = { wall: i, distance: t0, point: ray.at(t0, new THREE.Vector3()) };
+      }
+    });
+    return best;
+  };
 
   const [bx0, bz0] = toWorld(b.minX, b.minY);
   const [bx1, bz1] = toWorld(b.maxX, b.maxY);
@@ -369,14 +488,17 @@ export function buildFlat(plan: Plan, u: Uniforms, maxAniso: number): Built {
     shell: [heads, ceiling],
     furniture: [furn, furnGlass, lamps],
     lamps,
-    wallOfFace: Int32Array.from(wallQ.owner),
-    capOfFace: Int32Array.from(capQ.owner),
     anchors,
-    lights,
+    cuts,
+    field,
+    table,
+    tableSize: new THREE.Vector2(gs.sizeX / 1000, gs.sizeY / 1000),
     box,
     height: H,
+    base: BASE,
     toWorld,
     entry: new THREE.Vector3(ex, 0, ez),
+    pick,
     dispose() {
       root.traverse((o) => {
         const mesh = o as THREE.Mesh;
@@ -384,11 +506,58 @@ export function buildFlat(plan: Plan, u: Uniforms, maxAniso: number): Built {
         const mat = mesh.material as THREE.Material | THREE.Material[] | undefined;
         if (Array.isArray(mat)) mat.forEach((x) => x.dispose());
         else mat?.dispose();
+        if (mesh.customDepthMaterial) mesh.customDepthMaterial.dispose();
       });
       tex.dispose();
+      aoTex.dispose();
       gTex.dispose();
+      field.dispose();
     }
   };
+}
+
+/**
+ * The plan symbol of a door, drawn flat in the wall's frame (u along, v across,
+ * mm): the leaf standing open at a right angle and the arc it sweeps. Folding
+ * doors are drawn as their two leaves.
+ */
+function doorSymbol(o: Opening, t: number, quad: (pts: [number, number][]) => void): void {
+  const into = o.into ?? 1;
+  const startHinge = (o.hinge ?? 'start') === 'start';
+  const hu = startHinge ? o.at : o.at + o.w;
+  const sweep = startHinge ? 1 : -1;
+  const hv = into * (t / 2);
+  const line = (u0: number, v0: number, u1: number, v1: number, w: number) => {
+    const du = u1 - u0;
+    const dv = v1 - v0;
+    const len = Math.hypot(du, dv) || 1;
+    const pu = (-dv / len) * (w / 2);
+    const pv = (du / len) * (w / 2);
+    quad([
+      [u0 + pu, v0 + pv],
+      [u1 + pu, v1 + pv],
+      [u1 - pu, v1 - pv],
+      [u0 - pu, v0 - pv]
+    ]);
+  };
+  if (o.leaf === 'fold') {
+    const a = (72 * Math.PI) / 180;
+    const half = o.w / 2;
+    const mu = hu + sweep * Math.cos(a) * half;
+    const mv = hv + into * Math.sin(a) * half;
+    line(hu, hv, mu, mv, 30);
+    line(mu, mv, hu + sweep * 2 * Math.cos(a) * half, hv, 30);
+    return;
+  }
+  const r = o.w;
+  line(hu, hv, hu, hv + into * r, 36);
+  const steps = 14;
+  for (let i = 0; i < steps; i++) {
+    const a0 = (i / steps) * (Math.PI / 2);
+    const a1 = ((i + 1) / steps) * (Math.PI / 2);
+    const p = (a: number, rr: number): [number, number] => [hu + sweep * Math.cos(a) * rr, hv + into * Math.sin(a) * rr];
+    quad([p(a0, r - 11), p(a1, r - 11), p(a1, r + 11), p(a0, r + 11)]);
+  }
 }
 
 /** A window in the frame of its wall: x along the wall from the opening's start, z across it. */
