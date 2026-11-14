@@ -88,8 +88,15 @@ export function mainFacade(plan: Plan): Facade | null {
   };
   let first = edge;
   let last = edge;
-  for (let k = 1; k < n && straight(first - 1) && first - 1 !== last - n; k++) first--;
-  for (let k = 1; k < n && straight(last + 1) && last + 1 !== first + n; k++) last++;
+  let taken = 1;
+  while (taken < n && straight(first - 1)) {
+    first--;
+    taken++;
+  }
+  while (taken < n && straight(last + 1)) {
+    last++;
+    taken++;
+  }
   const a = ring[((first % n) + n) % n];
   const b = ring[(((last + 1) % n) + n) % n];
   const length = Math.hypot(b[0] - a[0], b[1] - a[1]);
@@ -98,6 +105,7 @@ export function mainFacade(plan: Plan): Facade | null {
   const mid: Pt = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
   let out: Pt = [dy, -dx];
   if (pointInPoly(mid[0] + out[0] * 50, mid[1] + out[1] * 50, ring)) out = [-dy, dx];
+  // Adding zero turns a negative zero positive, so the vector compares equal to the one written by hand.
   out = [out[0] + 0, out[1] + 0];
   const offset = degrees(Math.atan2(out[0], -out[1]) / RAD);
 
