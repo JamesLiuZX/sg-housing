@@ -164,7 +164,7 @@ const SOFT_PCF = /* glsl */ `
 
 let softChunk: string | null = null;
 /** The shadow chunk with the PCF branch of the directional filter swapped for SOFT_PCF. */
-function softShadowChunk(): string {
+export function softShadowChunk(): string {
   if (softChunk !== null) return softChunk;
   const src = THREE.ShaderChunk.shadowmap_pars_fragment;
   const open = '#if defined( SHADOWMAP_TYPE_PCF )';

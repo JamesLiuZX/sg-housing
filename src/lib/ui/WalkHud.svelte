@@ -3,16 +3,19 @@
   import { fade, fly } from 'svelte/transition';
   import type { Viewer } from '../engine/Viewer';
   import { boundsOf, frameOf, openingsOf, pointInPoly } from '../plan/geometry';
-  import { clock } from '../sg/solar';
   import { ms } from './motion';
+  import { roomView } from './pins';
+  import RoomStrip from './RoomStrip.svelte';
   import type { Session } from './session.svelte';
-  import SunArc from './SunArc.svelte';
+  import SunPill from './SunPill.svelte';
   import { sunIsUp } from './sunText';
+  import WalkPins from './WalkPins.svelte';
 
   /**
    * First person. Just enough to stay oriented and get back out: the way to
-   * the overview, a plan with you on it, a hint until you have moved, and the
-   * sun, so the light can be moved from inside the room.
+   * the overview, a plan with you on it, a hint until you have moved, the
+   * rooms to jump between, the sun so the light can be moved from inside, and
+   * a few facts pinned in the room you are in.
    */
   let {
     viewer,
@@ -22,7 +25,7 @@
     onexit
   }: { viewer: Viewer; session: Session; frames: Set<() => void>; landed?: boolean; onexit: () => void } = $props();
 
-  // The plan is fixed for the life of the page, so the map is drawn from it once.
+  // The flat does not change during a walk, so the map is drawn from it once.
   // svelte-ignore state_referenced_locally
   const plan = session.plan;
 
@@ -88,6 +91,12 @@
     if (here !== roomId) roomId = here;
   }
 
+  /** A room from the strip: walk there, round the furniture, and look at its window. */
+  function go(id: string): void {
+    const view = roomView(plan, id);
+    if (view) viewer.walkTo(view.at, view.lookAt);
+  }
+
   const fine = typeof window !== 'undefined' && !!window.matchMedia?.('(hover: hover) and (pointer: fine)').matches;
   let hint = $state(false);
 
@@ -114,7 +123,7 @@
 </script>
 
 <div class="hud">
-  <div class="corner" in:fly={{ y: -10, duration: ms(420), delay: ms(600) }} out:fade={{ duration: ms(160) }}>
+  <div class="corner" data-avoid in:fly={{ y: -10, duration: ms(420), delay: ms(600) }} out:fade={{ duration: ms(160) }}>
     <button class="out glass" onclick={onexit}>
       <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
         <path d="M9 2.4 15 5.7v6.6L9 15.6l-6-3.3V5.7L9 2.4Z" />
@@ -125,7 +134,7 @@
     <p class="disclose">Computer-generated model, not a photograph</p>
   </div>
 
-  <figure class="map glass" aria-label={room ? `Plan of the flat. You are in ${where}.` : 'Plan of the flat'} in:fly={{ y: -10, duration: ms(420), delay: ms(680) }} out:fade={{ duration: ms(160) }}>
+  <figure class="map glass" data-avoid aria-label={room ? `Plan of the flat. You are in ${where}.` : 'Plan of the flat'} in:fly={{ y: -10, duration: ms(420), delay: ms(680) }} out:fade={{ duration: ms(160) }}>
     <svg viewBox="{box.x} {box.y} {box.w} {box.h}" aria-hidden="true">
       <defs>
         <radialGradient id="hud-cone" gradientUnits="userSpaceOnUse" cx="0" cy="0" r="2900">
@@ -162,15 +171,13 @@
     </p>
   {/if}
 
-  <div class="scrub glass" in:fly={{ y: 16, duration: ms(460), delay: ms(760) }} out:fade={{ duration: ms(160) }}>
-    <p class="time num">{clock(session.minutes)}</p>
-    <div class="track"><SunArc {session} compact /></div>
-    <button class="play" class:on={session.playing} onclick={() => session.togglePlay()} aria-label={session.playing ? 'Pause' : 'Play the day'}>
-      <svg width="18" height="18" viewBox="0 0 20 20" aria-hidden="true">
-        <path class="i-play" d="M7.2 5.1v9.8a.6.6 0 0 0 .9.5l7.6-4.9a.6.6 0 0 0 0-1L8.1 4.6a.6.6 0 0 0-.9.5Z" />
-        <path class="i-pause" d="M6.4 5h2.4v10H6.4zM11.2 5h2.4v10h-2.4z" />
-      </svg>
-    </button>
+  {#if landed}
+    <WalkPins {viewer} {session} {frames} here={roomId} />
+  {/if}
+
+  <div class="bottom" data-avoid in:fly={{ y: 16, duration: ms(460), delay: ms(760) }} out:fade={{ duration: ms(160) }}>
+    <RoomStrip {plan} here={roomId} onpick={go} />
+    <SunPill {session} />
   </div>
 </div>
 
@@ -285,7 +292,7 @@
   .hint {
     position: absolute;
     left: 50%;
-    bottom: calc(var(--gutter) + var(--safe-b) + 92px);
+    bottom: calc(var(--gutter) + var(--safe-b) + 128px);
     translate: -50% 0;
     max-width: calc(100% - 2 * var(--gutter));
     padding: 10px 16px;
@@ -296,64 +303,17 @@
     pointer-events: none;
   }
 
-  .scrub {
+  /* The rooms and the sun share the bottom edge, under the thumb. */
+  .bottom {
     position: absolute;
     left: 50%;
     bottom: calc(var(--gutter) + var(--safe-b));
     translate: -50% 0;
-    width: min(calc(100% - 2 * var(--gutter)), 440px);
-    display: grid;
-    grid-template-columns: auto 1fr auto;
-    align-items: center;
-    gap: 12px;
-    padding: 6px 6px 6px 16px;
-    border-radius: 999px;
+    width: min(calc(100% - 2 * var(--gutter) - var(--safe-l) - var(--safe-r)), 440px);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
     pointer-events: auto;
-  }
-  .time {
-    min-width: 8ch;
-    font-size: 16px;
-    font-weight: 500;
-    letter-spacing: -0.02em;
-  }
-  .track {
-    min-width: 0;
-  }
-  .play {
-    width: 44px;
-    height: 44px;
-    border-radius: 50%;
-    display: grid;
-    place-items: center;
-    box-shadow: inset 0 0 0 1px var(--line);
-    transition:
-      background-color 220ms,
-      color 220ms,
-      transform 200ms var(--ease-out);
-  }
-  .play:active {
-    transform: scale(0.92);
-  }
-  .play.on {
-    background: var(--ink);
-    color: var(--surface);
-    box-shadow: none;
-  }
-  .play path {
-    fill: currentColor;
-    transform-origin: 10px 10px;
-    transition:
-      opacity 180ms,
-      transform 320ms var(--spring-snappy);
-  }
-  .i-pause,
-  .on .i-play {
-    opacity: 0;
-    transform: scale(0.5);
-  }
-  .on .i-pause {
-    opacity: 1;
-    transform: none;
   }
 
   @media (min-width: 820px) {

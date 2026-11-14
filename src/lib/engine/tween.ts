@@ -2,6 +2,7 @@ export type Ease = (t: number) => number;
 
 export const ease = {
   linear: (t: number) => t,
+  in: (t: number) => t * t * t,
   out: (t: number) => 1 - Math.pow(1 - t, 3),
   outQuint: (t: number) => 1 - Math.pow(1 - t, 5),
   inOut: (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2),

@@ -105,7 +105,7 @@ function footprint(it: Item): [number, number] {
 }
 
 /** Blur a single-channel image in place with three box passes, which is close to a gaussian. */
-function blur(data: Float32Array, w: number, h: number, r: number): void {
+export function blur(data: Float32Array, w: number, h: number, r: number): void {
   const tmp = new Float32Array(data.length);
   for (let pass = 0; pass < 3; pass++) {
     for (let y = 0; y < h; y++) {

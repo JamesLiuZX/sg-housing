@@ -100,6 +100,9 @@ export function verdictFor(wall: Wall): Verdict | null {
   return base;
 }
 
+/** What a pin on a plain partition says in walk mode: the short answer, as a caption on the wall itself. */
+export const PIN_PARTITION = { text: 'This wall can usually go', sub: 'with an HDB permit' } as const;
+
 /** The key shown under the model. One entry per colour the engine uses. */
 export const LEGEND: { tone: Tone; label: string }[] = [
   { tone: 'no', label: 'Cannot be hacked' },
