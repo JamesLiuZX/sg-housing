@@ -151,8 +151,8 @@ export const hero4room: Plan = {
     { kind: 'aircon', x: 100, y: 2620, face: 'E' },
 
     // Bedroom 2
-    { kind: 'bed', x: 4030, y: 1180, face: 'S', w: 1000, d: 1950, solid: true, opts: { tone: 1 } },
-    { kind: 'desk', x: 5180, y: 390, face: 'S', w: 1150, d: 560, solid: true },
+    { kind: 'bed', x: 4055, y: 1180, face: 'S', w: 1000, d: 1950, solid: true, opts: { tone: 1 } },
+    { kind: 'desk', x: 5190, y: 390, face: 'S', w: 1150, d: 560, solid: true },
     { kind: 'wardrobe', x: 5950, y: 1500, face: 'W', w: 1400, d: 600, solid: true },
     { kind: 'aircon', x: 4850, y: 3150, face: 'N' },
 
@@ -166,10 +166,10 @@ export const hero4room: Plan = {
     // Bathrooms
     { kind: 'wc', x: 470, y: 5050, face: 'E', w: 400, d: 700, solid: true },
     { kind: 'vanity', x: 1420, y: 4930, face: 'W', w: 700, d: 460, solid: true },
-    { kind: 'showerScreen', x: 620, y: 5560, face: 'S', w: 1040 },
+    { kind: 'showerScreen', x: 620, y: 5560, face: 'S', w: 1040, d: 24, solid: true },
     { kind: 'wc', x: 2930, y: 5050, face: 'W', w: 400, d: 700, solid: true },
     { kind: 'vanity', x: 1980, y: 4930, face: 'E', w: 700, d: 460, solid: true },
-    { kind: 'showerScreen', x: 2780, y: 5560, face: 'S', w: 1040 },
+    { kind: 'showerScreen', x: 2780, y: 5560, face: 'S', w: 1040, d: 24, solid: true },
 
     // Household shelter
     { kind: 'rack', x: 12120, y: 6900, face: 'W', w: 1500, d: 450, solid: true },

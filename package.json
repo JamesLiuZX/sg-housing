@@ -9,7 +9,8 @@
     "build:single": "SINGLE=1 vite build --outDir dist-single",
     "preview": "vite preview",
     "check": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "blocks": "node scripts/build-blocks.mjs"
   },
   "dependencies": {
     "three": "^0.180.0"
