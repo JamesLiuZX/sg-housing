@@ -35,7 +35,7 @@ The buyer experience is the product. The seller and agent experience is the same
 ## 4. The first minute
 
 1. You open a link or type `440A Clementi Ave 3`. The block number appears large, the way it is painted on the block.
-2. The app recognises the block from open data: completed 2017, 30 storeys, 208 flats, 3-room and 4-room Model A. You pick 4-room.
+2. The app recognises the block from open data and shows it: the real block in 3D among its neighbours, completed 2017, 30 storeys, 208 flats, 3-room and 4-room Model A. You scrub up to the 25th storey, tap the side your windows face, and pick 4-room. The camera pushes in through the facade.
 3. A floor plan draws itself in graphite lines. Then the walls rise out of the lines, room by room, the floor finishes wash in, and daylight sweeps across. This is the signature moment.
 4. A small outline of your block appears. You tap the side your living room looks out of. The model turns to match.
 5. You drag the sun along its arc. A patch of light crawls across the master bedroom floor from 3:40pm. A line reads: _Master bedroom gets direct west sun 3:40 to 6:50pm, April to August._
@@ -152,6 +152,24 @@ Everything in the first public version works on plain static hosting. The server
 - **Motion with restraint.** Springs of 200 to 600 ms; reduced-motion setting respected.
 - **Budget.** Interactive within three seconds on mobile data; smooth on a four-year-old Android phone.
 
+## 8a. What we take from property showcase sites, and what we leave
+
+Reference: the scroll-driven new-development sites built by Lynam Up Media (a tower you scrub by floor, a cutaway of each unit, room views with hotspots, an amenity deck, "back to tower"). They look expensive because of four things, and only one of them is the imagery.
+
+How those sites are made, from their own guide: an image model generates a start frame and an end frame, a video model generates the move between them, and the site plays the video frames forward and back as you scroll. Every view is a fixed picture of one building. Nothing in it is measured, nothing responds to the time of day, and a second building means generating everything again.
+
+| Their pattern | What it does for the viewer | Blk's version |
+|---|---|---|
+| The tower, scrubbed by floor | You start from the building you know and find your place in it | **The block stage.** The real HDB block in 3D from HDB's own footprint and storey count, standing among its real neighbours, block number painted on the end wall. Scrub to a storey; the storey band's recent resale prices appear beside the number. Tap a side of the block to say where your windows face |
+| One continuous move from tower to unit to room | It feels like one place, not a set of pages | **The push-in.** The camera flies from the block to the chosen storey and through the facade into the flat, which is already facing the right way. "Back to block" reverses it |
+| Room views with a thumbnail strip and hotspots | You can jump anywhere and every view tells you something | **Room strip and pins.** In walk mode, a strip of rooms to jump between, and pins in the room that state facts: sun hours at this window, this wall can go with a permit, 3.3 m wide |
+| Dusk light, restrained type, almost no chrome | It reads as a finished production | **A golden-hour arrival.** The block stage opens in late-afternoon light with long shadows, because that is also when west sun matters. Type and controls stay as quiet as they are now |
+| The amenity deck | The building sells a life, not just a unit | **Around the block** (later): MRT, hawker centre and primary schools within 1 km as pins on the neighbourhood model, from open data |
+
+What we leave: generated photographs and generated video. Blk's claim is that what you see is true for this block, this storey, this hour. A generated picture of a typical flat is exactly what CEA has asked agents to label, and it cannot move the sun. The maquette stays, and gets better made.
+
+Why this fits Singapore better than it fits a luxury tower: there are 13,509 HDB blocks and every one of them is already in the index. The showcase site is one building, made by hand. Blk is every block, made from data.
+
 ## 9. Architecture
 
 - **Front end:** Vite, Svelte 5 and TypeScript, built as a static site that can also be packed into one self-contained HTML file for previews. Three.js for the scene, written directly for control over performance. Svelte's built-in springs and transitions handle interface motion.
@@ -179,8 +197,8 @@ Each milestone ends with something you can open on your phone.
 
 | # | Milestone | Contents | Done when |
 |---|---|---|---|
-| 1 | **Walls rise** | Project scaffold, flat format, scene builder, one hero flat (4-room, 93 sqm), plan-to-model animation, dollhouse and walk, real sun with the arc control, maquette look | The hero flat loads on a phone, the sun is correct for the date, and it feels good to use |
-| 2 | **Know the sun** | Address lookup, block index, orientation by tap, per-room sun sentences, three more templates | Typing a real block gives a correctly oriented flat and a sun summary |
+| 1 | **Walls rise** (built) | Flat format, scene builder, one hero flat, plan-to-model opening, dollhouse and walk, real sun with the arc control, three lenses, maquette look | The hero flat loads on a phone, the sun is correct for the date, and it feels good to use |
+| 2 | **Block to flat** | Address lookup, block index, the block stage (the real block in 3D among its neighbours, storey scrubber, tap a side to place the unit), the push-in from block to flat, room strip and pins in walk mode, layout library to three flats with mirroring | Typing a real block shows that block, and choosing a storey and a side lands you in a correctly oriented flat |
 | 3 | **Know the rules** | Wall verdicts with sources, dimensions lens, bare and furnished states, block fact strip | Every wall answers "can I remove this" with a reason and a link |
 | 4 | **Pass it on** | Flat-in-a-link, WhatsApp share with snapshot, reply-in-WhatsApp, always-on label, family tour in four languages, contact card with live CEA check, Telegram Mini App | A flat sent to a family chat opens as the same flat, and the agent card verifies a real registration number |
 | 5 | **Any flat** | Template library to twelve, floor plan upload with verification, will-it-fit, try-it wall removal, sun-hours map, best time to view | A real HDB floor plan becomes a walkable model in under a minute |
