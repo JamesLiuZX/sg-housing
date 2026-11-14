@@ -173,11 +173,11 @@ export function usualOption(lookup: BlockLookup | null, options: FlatOption[]): 
   );
 }
 
-/** The storey to start on: the middle of the block's latest sale, so its facts show at once; else about two-thirds up. */
+/** The storey to start on: the middle of the block's latest sale, so its facts show at once; else about two-thirds up. Never the void deck. */
 export function usualStorey(lookup: BlockLookup | null, storeys: number): number {
   const g = storeyRange(ok(lookup?.resales)?.recent[0]?.storeyRange ?? '');
   const n = g ? Math.round((g[0] + g[1]) / 2) : Math.round(storeys * 0.6);
-  return Math.min(storeys, Math.max(1, n));
+  return Math.min(storeys, Math.max(Math.min(2, storeys), n));
 }
 
 /** The layout that stands in for a flat type in a block, with how well it fits and why. */

@@ -10,7 +10,7 @@
    * is drawn in sun orange with the view out of it, so the bearing the sun
    * is worked from is never in doubt.
    */
-  let { session, large = false }: { session: Session; large?: boolean } = $props();
+  let { session }: { session: Session } = $props();
 
   const block = $derived(session.block);
   /** Metres of ground shown round the block. */
@@ -65,7 +65,7 @@
 </script>
 
 {#if block}
-  <figure class="outline glass" class:large aria-label="Blk {block.blk} from above, north up">
+  <figure class="outline glass" aria-label="Blk {block.blk} from above, north up">
     <svg viewBox="{box.x} {box.y} {box.w} {box.h}" role="group" aria-label="Sides of the block">
       <path class="near" d={near} />
       <path class="own" d={own} />
@@ -109,9 +109,6 @@
     padding: 6px;
     border-radius: 18px;
     pointer-events: auto;
-  }
-  .outline.large {
-    width: 220px;
   }
   svg {
     display: block;

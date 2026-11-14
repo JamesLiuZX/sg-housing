@@ -158,8 +158,13 @@ export class Session {
     this.wall = null;
   }
 
+  /** The lowest storey with flats: storey 1 is the void deck. */
+  get lowest(): number {
+    return Math.min(2, this.storeys);
+  }
+
   setStorey(n: number): void {
-    this.storey = Math.min(this.storeys, Math.max(1, Math.round(n)));
+    this.storey = Math.min(this.storeys, Math.max(this.lowest, Math.round(n)));
   }
 
   chooseSide(facade: Facade | null, along = 0.5): void {

@@ -12,6 +12,8 @@
   let { session }: { session: Session } = $props();
 
   const n = $derived(session.storeys);
+  /** Storey 1 is the void deck: the scale shows it, but the thumb stops a storey above. */
+  const low = $derived(session.lowest);
   const storey = $derived(session.storey);
   const sold = $derived(soldRanges(session.resales));
   const sale = $derived(session.sales[0] ? saleWords(session.sales[0]) : null);
@@ -32,7 +34,7 @@
   let dir = $state(1);
 
   function set(next: number): void {
-    const s = Math.min(n, Math.max(1, Math.round(next)));
+    const s = Math.min(n, Math.max(low, Math.round(next)));
     if (s === storey) return;
     dir = s > storey ? 1 : -1;
     session.setStorey(s);
@@ -64,7 +66,7 @@
   function key(e: KeyboardEvent): void {
     const step = STEPS[e.key];
     if (step) set(storey + step);
-    else if (e.key === 'Home') set(1);
+    else if (e.key === 'Home') set(low);
     else if (e.key === 'End') set(n);
     else return;
     e.preventDefault();
@@ -100,7 +102,7 @@
     tabindex="0"
     aria-orientation="vertical"
     aria-label="Storey"
-    aria-valuemin={1}
+    aria-valuemin={low}
     aria-valuemax={n}
     aria-valuenow={storey}
     aria-valuetext="Storey {storey} of {n}"

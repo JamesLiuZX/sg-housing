@@ -17,10 +17,11 @@
   let why = $state(false);
   let chips = $state<HTMLElement>();
 
-  // A new choice closes the reason; it may not be the same reason any more.
+  // A new choice closes the reason, which may not be the same reason any more, and keeps the chosen chip in view.
   $effect(() => {
-    void session.option;
+    const t = session.option?.flatType;
     why = false;
+    chips?.querySelector<HTMLElement>(`[data-type="${t}"]`)?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   });
 
   function chosen(flatType: string): boolean {
@@ -44,7 +45,7 @@
   <div class="chips" role="radiogroup" aria-label="Flat type" bind:this={chips} tabindex="-1" onkeydown={key}>
     {#each options as o, i (o.flatType)}
       {@const on = chosen(o.flatType)}
-      <button role="radio" aria-checked={on} tabindex={on ? 0 : -1} class:on style="--i:{i}" onclick={() => session.chooseFlat(o)}>
+      <button role="radio" aria-checked={on} tabindex={on ? 0 : -1} class:on data-type={o.flatType} style="--i:{i}" onclick={() => session.chooseFlat(o)}>
         <span class="type">{typeWords(o.flatType)}</span>
         {#if o.areaSqm}<span class="area num">{sqmText(o.areaSqm)}</span>{/if}
       </button>
@@ -87,12 +88,15 @@
   /* The types run in one line and scroll sideways if a block has many. */
   .chips {
     display: flex;
-    gap: 6px;
+    gap: 5px;
     overflow-x: auto;
     scrollbar-width: none;
     margin: 0 -2px;
-    padding: 2px;
+    padding: 2px 14px 2px 2px;
     outline: none;
+    /* A row that runs past the edge fades there, so a type half in view reads as "more this way". */
+    mask-image: linear-gradient(to right, #000 calc(100% - 22px), transparent);
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 22px), transparent);
   }
   .chips::-webkit-scrollbar {
     display: none;
@@ -101,9 +105,9 @@
     flex: none;
     display: inline-flex;
     align-items: baseline;
-    gap: 7px;
+    gap: 6px;
     height: 44px;
-    padding: 0 16px;
+    padding: 0 13px;
     border-radius: 999px;
     box-shadow: inset 0 0 0 1px var(--line);
     font-size: 14px;
@@ -122,7 +126,7 @@
     transform: scale(0.96);
   }
   .chips .area {
-    font-size: 12.5px;
+    font-size: 12px;
     font-weight: 400;
     color: var(--ink-2);
     transition: color 220ms;

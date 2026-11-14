@@ -13,14 +13,10 @@
    * living room faces, tapped on the block (or on its outline, top right).
    * The flat type and the way in at the bottom, with the sun, which arrives
    * low in the west so the shadows say where it will fall.
-   *
-   * Without the engine's block stage the outline is the way to choose a side,
-   * and the flat's plan is drawn behind instead of the block.
    */
   let {
     session,
     wide,
-    engine,
     leaving,
     bottom = $bindable(0),
     left = $bindable(0),
@@ -29,8 +25,6 @@
   }: {
     session: Session;
     wide: boolean;
-    /** The engine is showing the block in 3D. */
-    engine: boolean;
     leaving: boolean;
     bottom?: number;
     left?: number;
@@ -63,7 +57,7 @@
       <p class="road">{hit ? roadName(hit.road) : ''}</p>
       {#if facts.length}
         <p class="facts">
-          {#each facts as f, i (f)}{#if i}<span class="dot" aria-hidden="true"> · </span>{/if}<span>{f}</span>{/each}
+          {#each facts as f, i (f)}{#if i}<span class="dot" aria-hidden="true">{' · '}</span>{/if}<span>{f}</span>{/each}
           {#if source}
             <a class="src" href={source.url} target="_blank" rel="noopener" aria-label="Source: {source.name}, data.gov.sg (opens in a new tab)">
               <svg width="11" height="11" viewBox="0 0 11 11" aria-hidden="true"><path d="M3.5 2.5h5v5M8.5 2.5l-6 6" /></svg>
@@ -96,7 +90,7 @@
   </div>
 {/snippet}
 
-<div class="bs" class:wide class:leaving class:engine>
+<div class="bs" class:wide class:leaving>
   {#if wide}
     <section class="panel" bind:this={panel} bind:clientWidth={panelW} data-avoid>
       {@render who(true)}
@@ -106,7 +100,7 @@
       </div>
       <p class="disclose">Computer-generated model, not a photograph</p>
     </section>
-    <div class="map" data-avoid><BlockOutline {session} large={!engine} /></div>
+    <div class="map" data-avoid><BlockOutline {session} /></div>
     <div class="scale" data-avoid><StoreyScrubber {session} /></div>
     <div class="sun" bind:clientHeight={bottom} style:left="{left + 24}px" data-avoid><SunPill {session} /></div>
   {:else}
@@ -163,15 +157,17 @@
     position: absolute;
     top: calc(var(--gutter) + var(--safe-t));
     left: calc(var(--gutter) + var(--safe-l));
-    right: calc(var(--gutter) + 132px + var(--safe-r));
+    right: calc(var(--gutter) + var(--safe-r));
     animation: rise-in 600ms var(--ease-out) 120ms both;
     text-shadow:
       0 0 2px var(--surface),
       0 0 6px var(--surface),
       0 0 14px rgb(var(--surface-rgb) / 0.85);
   }
+  /* The way back on its own row, then the name under it, so the words get the width of the screen. */
   .who {
     display: flex;
+    flex-direction: column;
     align-items: flex-start;
     gap: 10px;
   }
@@ -200,7 +196,14 @@
   }
   .name {
     min-width: 0;
-    padding-top: 2px;
+    padding-left: 2px;
+  }
+  /* Clear of the outline in the top right corner. */
+  .top .blk,
+  .top .road {
+    max-width: calc(100vw - 2 * var(--gutter) - 140px);
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   /* Set large, the way the number is painted on the end wall of the block. */
   .blk {
@@ -409,9 +412,10 @@
   .wide .map {
     top: calc(var(--gutter) + var(--safe-t));
   }
+  /* Under the outline, and clear of the sun at the bottom. */
   .wide .scale {
-    top: 18%;
-    bottom: 18%;
+    top: calc(var(--gutter) + var(--safe-t) + 214px);
+    bottom: calc(var(--gutter) + var(--safe-b) + 96px);
     right: calc(var(--gutter) + 8px + var(--safe-r));
   }
   .sun {

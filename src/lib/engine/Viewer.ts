@@ -793,7 +793,8 @@ export class Viewer {
         this.setOrbit(lerp(theta0, sph.theta, k), sph.phi, lerp(d0, f.d, k));
       })
       .then(() => {
-        if (this.mode !== 'doll') return;
+        // Cut short by a flight (the push back out to the block), the camera is that flight's.
+        if (this.mode !== 'doll' || this.flying) return;
         this.controls.target.copy(this.target);
         this.controls.update();
         this.orbitLive = true;
@@ -1260,14 +1261,8 @@ export class Viewer {
     const win = placeSite(this.current, this.bearing, this.unit, this.built.toWorld).window;
     if (!win) return Promise.resolve();
     const sph = new THREE.Spherical().setFromVector3(this.camera.position.clone().sub(this.controls.target));
-    const face = Math.atan2(win.normal.x, win.normal.z);
     const turn = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
-    // The flat itself, on its storey and a little either side of it, matters most.
-    const toSite = this.siteMatrix.clone().invert();
-    const side = new THREE.Vector3(win.normal.z, 0, -win.normal.x);
-    const focus = [-5, 0, 5].map((s) => win.point.clone().addScaledVector(win.normal, 0.5).addScaledVector(side, s).setY(1.3).applyMatrix4(toSite));
-    // Within about 75° of square on, so the flat's side faces the camera.
-    const theta = this.clearView([face + 0.55, face - 0.55], sph.phi, 0.75, focus);
+    const theta = this.unitView(win, sph.phi);
     const to = this.blockFraming(theta, sph.phi);
     const t0 = this.controls.target.clone();
     const theta0 = sph.theta;
@@ -1596,6 +1591,16 @@ export class Viewer {
     return { theta: this.clearView([sun + 1.15, sun - 1.15], phi, Math.PI, []), phi };
   }
 
+  /** The azimuth that shows the flat's side three-quarter on and within about 75° of square, past the neighbours if it can. */
+  private unitView(win: { point: THREE.Vector3; normal: THREE.Vector3 }, phi: number): number {
+    const face = Math.atan2(win.normal.x, win.normal.z);
+    // The flat itself, on its storey and a little either side of it, matters most.
+    const toSite = this.siteMatrix.clone().invert();
+    const side = new THREE.Vector3(win.normal.z, 0, -win.normal.x);
+    const focus = [-5, 0, 5].map((s) => win.point.clone().addScaledVector(win.normal, 0.5).addScaledVector(side, s).setY(1.3).applyMatrix4(toSite));
+    return this.clearView([face + 0.55, face - 0.55], phi, 0.75, focus);
+  }
+
   /**
    * The camera azimuth, within `spread` of the ideal ones, from which the
    * neighbours hide least of the block, and of the `focus` points (site frame)
@@ -1731,8 +1736,8 @@ export class Viewer {
       doll = { target: f.target, r: f.d, theta, phi, pad: bottom };
     } else {
       doll = now;
-      const theta = face + side * 0.55;
       const phi = 1.12;
+      const theta = win ? this.unitView(win, phi) : face + side * 0.55;
       this.pad = bottom;
       const f = this.blockFraming(theta, phi);
       this.pad = pad0;
@@ -2145,7 +2150,7 @@ export class Viewer {
       this.shadowDirty = true;
     }
     if (this.mode === 'walk' && !this.flying) this.stepWalk(dt);
-    else if (this.orbitLive) this.controls.update();
+    else if (this.orbitLive && !this.pushing) this.controls.update();
     // During the push-in the walls hold the cut made for where it arrives.
     if (!this.introRunning && !this.pushing && this.stepCuts(dt)) this.dirty = true;
     if (!this.dirty) return;
