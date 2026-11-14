@@ -37,8 +37,7 @@
   <p class="what">
     {#if hit && option}
       <span class="title"
-        ><span class="num">{storeyTag(session.storey)}</span> · {typeWords(option.flatType)}{#if area}
-          · <span class="num">{area} m²</span>{/if}</span
+        ><span class="num">{storeyTag(session.storey)}</span> · {typeWords(option.flatType)}{#if area}{' · '}<span class="num">{area} m²</span>{/if}</span
       >
       <span class="sub" title="Typical layout for this flat type, not this block's own floor plan."
         >{fit}{#if differs}&nbsp;of <span class="num">{plan.areaSqm} m²</span>{/if} · {roadName(hit.road)}</span

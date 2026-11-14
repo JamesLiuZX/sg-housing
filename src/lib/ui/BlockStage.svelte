@@ -159,6 +159,8 @@
     left: calc(var(--gutter) + var(--safe-l));
     right: calc(var(--gutter) + var(--safe-r));
     animation: rise-in 600ms var(--ease-out) 120ms both;
+    /* It spans the width for its words; touches between them reach the block. */
+    pointer-events: none;
     text-shadow:
       0 0 2px var(--surface),
       0 0 6px var(--surface),
@@ -170,6 +172,10 @@
     flex-direction: column;
     align-items: flex-start;
     gap: 10px;
+  }
+  .back,
+  .src {
+    pointer-events: auto;
   }
   .back {
     flex: none;
@@ -282,7 +288,7 @@
     gap: 10px;
   }
   .dock .sheet {
-    padding: 10px 12px 12px;
+    padding: 10px 10px 12px;
     border-radius: 24px;
   }
 

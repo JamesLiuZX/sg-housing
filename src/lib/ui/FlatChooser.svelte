@@ -16,6 +16,14 @@
   const good = $derived(candidate?.fit === 'good');
   let why = $state(false);
   let chips = $state<HTMLElement>();
+  let rowW = $state(0);
+  /** Whether the types run past the edge, so the edge fades to say so. */
+  let over = $state(false);
+  $effect(() => {
+    void rowW;
+    void options;
+    over = !!chips && chips.scrollWidth > chips.clientWidth + 1;
+  });
 
   // A new choice closes the reason, which may not be the same reason any more, and keeps the chosen chip in view.
   $effect(() => {
@@ -42,7 +50,7 @@
 </script>
 
 <div class="chooser">
-  <div class="chips" role="radiogroup" aria-label="Flat type" bind:this={chips} tabindex="-1" onkeydown={key}>
+  <div class="chips" class:over role="radiogroup" aria-label="Flat type" bind:this={chips} bind:clientWidth={rowW} tabindex="-1" onkeydown={key}>
     {#each options as o, i (o.flatType)}
       {@const on = chosen(o.flatType)}
       <button role="radio" aria-checked={on} tabindex={on ? 0 : -1} class:on data-type={o.flatType} style="--i:{i}" onclick={() => session.chooseFlat(o)}>
@@ -88,13 +96,16 @@
   /* The types run in one line and scroll sideways if a block has many. */
   .chips {
     display: flex;
-    gap: 5px;
+    gap: 4px;
     overflow-x: auto;
     scrollbar-width: none;
     margin: 0 -2px;
-    padding: 2px 14px 2px 2px;
+    padding: 2px;
     outline: none;
-    /* A row that runs past the edge fades there, so a type half in view reads as "more this way". */
+  }
+  /* A row that runs past the edge fades there, so a type half in view reads as "more this way". */
+  .chips.over {
+    padding-right: 18px;
     mask-image: linear-gradient(to right, #000 calc(100% - 22px), transparent);
     -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 22px), transparent);
   }
@@ -105,12 +116,12 @@
     flex: none;
     display: inline-flex;
     align-items: baseline;
-    gap: 6px;
+    gap: 5px;
     height: 44px;
-    padding: 0 13px;
+    padding: 0 10px;
     border-radius: 999px;
     box-shadow: inset 0 0 0 1px var(--line);
-    font-size: 14px;
+    font-size: 13.5px;
     font-weight: 600;
     letter-spacing: -0.005em;
     line-height: 44px;
@@ -126,7 +137,7 @@
     transform: scale(0.96);
   }
   .chips .area {
-    font-size: 12px;
+    font-size: 11.5px;
     font-weight: 400;
     color: var(--ink-2);
     transition: color 220ms;
@@ -138,6 +149,18 @@
   }
   .chips button.on .area {
     color: rgb(var(--surface-rgb) / 0.72);
+  }
+  @media (min-width: 820px) {
+    .chips {
+      gap: 6px;
+    }
+    .chips button {
+      padding: 0 14px;
+      font-size: 14px;
+    }
+    .chips .area {
+      font-size: 12px;
+    }
   }
   @media (hover: hover) {
     .chips button:not(.on):hover {

@@ -78,7 +78,7 @@ export interface Pin {
   sub: string;
 }
 
-/** "3.3 × 3.0 m" for a room that is a plain rectangle inside its walls; null for any other shape. */
+/** "3.3 × 3.0 m" for a room that is a plain rectangle inside its walls (its area fills its bounds); null for any other shape. */
 function clearSides(plan: Plan, room: Room): string | null {
   const poly = clearPoly(plan, room);
   const xs = poly.map((p) => p[0]);
@@ -86,7 +86,7 @@ function clearSides(plan: Plan, room: Room): string | null {
   const w = Math.max(...xs) - Math.min(...xs);
   const d = Math.max(...ys) - Math.min(...ys);
   const area = clearAreaSqm(plan, room) * 1e6;
-  if (poly.length !== 4 || Math.abs(area - w * d) > w * d * 0.02) return null;
+  if (Math.abs(area - w * d) > w * d * 0.02) return null;
   const [a, b] = w >= d ? [w, d] : [d, w];
   return `${(a / 1000).toFixed(1)} × ${(b / 1000).toFixed(1)} m`;
 }

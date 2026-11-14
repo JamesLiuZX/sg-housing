@@ -296,6 +296,8 @@
   async function backToBlock(): Promise<void> {
     if (!viewer || session.stage !== 'explore' || !session.place) return;
     session.wall = null;
+    // The Sun lens may have turned the flat; in its block it faces the side that was chosen.
+    session.orient();
     session.stage = 'leaving';
     if (reduced) showSite(viewer);
     else await viewer.exitToBlock(blockGuess());

@@ -166,7 +166,7 @@
   </figure>
 
   {#if hint}
-    <p class="hint glass" in:fly={{ y: 8, duration: ms(420) }} out:fade={{ duration: ms(420) }}>
+    <p class="hint glass" data-avoid in:fly={{ y: 8, duration: ms(420) }} out:fade={{ duration: ms(420) }}>
       {fine ? 'Click the floor to move. Drag to look, or use WASD.' : 'Tap the floor to move. Drag to look.'}
     </p>
   {/if}
