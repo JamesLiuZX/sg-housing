@@ -6,13 +6,15 @@
  * screenshots: software rendering is slow); ?auto=0 stays on the plan; ?m=990 sets minutes of the day;
  * ?month=5 sets the month (0 to 11); ?lens=sun|rules|space; ?inset=330 reserves that many pixels at
  * the bottom, as the interface's controls do (330 is the sun controls on a phone);
- * ?plan=bto-3room-68 shows another template from the library (the hero when left out).
+ * ?plan=bto-3room-68 shows another template from the library (the hero when left out); ?mirror=1 shows
+ * it the other way round, as its twin across the party wall.
  *
  * The plan is validated on load and every issue goes to the console, so a layout
  * being drawn shows its mistakes in the same place as its model.
  */
 import { Viewer, type Lens } from './lib/engine/Viewer';
 import { hero4room } from './lib/plan/hero4room';
+import { mirror } from './lib/plan/mirror';
 import { templateById } from './lib/plan/templates';
 import { validatePlan } from './lib/plan/validate';
 import { dayPath, sunAt, type SunDate } from './lib/sg/solar';
@@ -24,7 +26,8 @@ const minutes = Number(q.get('m') ?? 16 * 60 + 30);
 const wanted = q.get('plan');
 const template = wanted ? templateById(wanted) : undefined;
 if (wanted && !template) console.warn(`There is no template called ${wanted}; showing the hero flat.`);
-const plan = template?.plan ?? hero4room;
+const base = template?.plan ?? hero4room;
+const plan = q.get('mirror') === '1' ? mirror(base) : base;
 const issues = validatePlan(plan);
 for (const i of issues) console.warn(`[${i.level} ${i.code}] ${i.ref}: ${i.message}`);
 document.title = `Blk harness: ${plan.id}`;

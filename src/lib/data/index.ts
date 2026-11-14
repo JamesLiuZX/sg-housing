@@ -27,6 +27,7 @@ export {
   type DataGovConfig
 } from './datagov';
 export { lookupBlock } from './lookup';
+export { lookupDemo, demoHit, isDemoHit, DEMO_POSTAL, DEMO_TAKEN, type DemoLookup } from './demo';
 export { hdbStreet, streetKey, hdbBlock } from './street';
 export { cacheClear as clearDataCache } from './cache';
 export type { Manifest, ManifestSector } from './shard';

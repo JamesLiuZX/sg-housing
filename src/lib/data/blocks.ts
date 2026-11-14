@@ -46,7 +46,8 @@ function indexUrl(file: string): string {
   return `${base ?? `${import.meta.env.BASE_URL}blocks/`}${file}`;
 }
 
-interface LoadedSector {
+/** A shard decoded and ready to search. */
+export interface LoadedSector {
   shard: Shard;
   frame: LocalFrame;
   rows: DecodedRow[];
@@ -68,6 +69,16 @@ function ringBounds(parts: Part[]): Bounds {
   return b;
 }
 
+/** Decodes every row of a shard once, so lookups and neighbour searches in it are cheap. Pure. */
+export function prepareSector(shard: Shard): LoadedSector {
+  const rows: DecodedRow[] = [];
+  for (const row of shard.blocks) {
+    const d = Array.isArray(row) ? decodeRow(row, shard.unit) : null;
+    if (d) rows.push(d);
+  }
+  return { shard, frame: localFrame(shard.origin[0], shard.origin[1]), rows, bounds: rows.map((d) => ringBounds(d.parts)) };
+}
+
 /** The sector file, fetched once per visit and shared by every caller. Failures are not kept, so a retry can succeed. */
 function loadSector(sector: string): Promise<Result<LoadedSector>> {
   let p = sectors.get(sector);
@@ -75,17 +86,7 @@ function loadSector(sector: string): Promise<Result<LoadedSector>> {
     p = getJson(indexUrl(`${sector}.json`), { service: 'blocks', sameOrigin: true, retries: 1 }).then((r): Result<LoadedSector> => {
       if (!r.ok) return r.result;
       if (!isShard(r.body)) return unavailable('blocks', 'bad-response', `${sector}.json is not a version 1 shard`);
-      const shard = r.body;
-      const rows: DecodedRow[] = [];
-      for (const row of shard.blocks) {
-        const d = Array.isArray(row) ? decodeRow(row, shard.unit) : null;
-        if (d) rows.push(d);
-      }
-      return {
-        status: 'ok',
-        data: { shard, frame: localFrame(shard.origin[0], shard.origin[1]), rows, bounds: rows.map((d) => ringBounds(d.parts)) },
-        fetchedAt: Date.now()
-      };
+      return { status: 'ok', data: prepareSector(r.body), fetchedAt: Date.now() };
     });
     sectors.set(sector, p);
     void p.then((r) => {
@@ -185,9 +186,19 @@ export async function loadBlock(postal: string, options: LoadBlockOptions = {}):
     return loaded.status === 'unavailable' ? loaded : unavailable('blocks', 'server');
   }
 
-  const { rows, bounds, frame } = loaded.data;
-  const i = rows.findIndex((r) => r.postal === code);
-  if (i < 0) return { status: 'not-found' };
+  const block = locateBlock(loaded.data, code, radius);
+  return block ? { status: 'ok', data: block, fetchedAt: loaded.fetchedAt } : { status: 'not-found' };
+}
+
+/**
+ * A block and its neighbours from a decoded sector, in the block's own frame,
+ * or null when the sector has no block at that postal code. Pure: the bundled
+ * demo uses it on its snapshot exactly as `loadBlock` does on a fetched file.
+ */
+export function locateBlock(sector: LoadedSector, postal: string, radius = 150): Block | null {
+  const { rows, bounds, frame } = sector;
+  const i = rows.findIndex((r) => r.postal === postal);
+  if (i < 0) return null;
   const row = rows[i];
 
   const [cx, cy] = centroidOf(row.parts);
@@ -204,12 +215,7 @@ export async function loadBlock(postal: string, options: LoadBlockOptions = {}):
     }
     neighbours.sort((a, b) => a.gap - b.gap);
   }
-
-  return {
-    status: 'ok',
-    data: { postal: row.postal, blk: row.blk, lat, lng, footprint: footprintOf(shiftParts(row.parts, cx, cy)), neighbours },
-    fetchedAt: loaded.fetchedAt
-  };
+  return { postal: row.postal, blk: row.blk, lat, lng, footprint: footprintOf(shiftParts(row.parts, cx, cy)), neighbours };
 }
 
 /**
