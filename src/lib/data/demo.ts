@@ -12,10 +12,10 @@
  */
 
 import { locateBlock, prepareSector } from './blocks';
-import { summariseResales, toFacts } from './datagov';
-import { SNAPSHOT_FACTS, SNAPSHOT_HIT, SNAPSHOT_RESALES, SNAPSHOT_SHARD, SNAPSHOT_TAKEN } from './demo-snapshot';
+import { summariseResales, toFacts, toHeight } from './datagov';
+import { SNAPSHOT_FACTS, SNAPSHOT_HEIGHTS, SNAPSHOT_HIT, SNAPSHOT_RESALES, SNAPSHOT_SHARD, SNAPSHOT_TAKEN } from './demo-snapshot';
 import { toHit } from './onemap';
-import type { AddressHit, Block, BlockFacts, BlockLookup, Found, ResaleSummary } from './types';
+import type { AddressHit, Block, BlockFacts, BlockHeight, BlockLookup, Found, ResaleSummary } from './types';
 
 export const DEMO_POSTAL = '121440';
 
@@ -65,4 +65,25 @@ export function demoHit(): AddressHit {
 /** True when a hit is the bundled block, so the interface can use `lookupDemo` instead of the network. */
 export function isDemoHit(hit: Pick<AddressHit, 'postal'>): boolean {
   return hit.postal === DEMO_POSTAL;
+}
+
+let heights: ReadonlyMap<string, Readonly<BlockHeight> | null> | null = null;
+
+/**
+ * The heights the snapshot holds, by postal code: the bundled block's own and
+ * each of its neighbours', read with the live lookup's parser; null for a
+ * neighbour HDB had no record of. Shared, so read-only; nothing here touches
+ * the network.
+ */
+export function snapshotHeights(): ReadonlyMap<string, Readonly<BlockHeight> | null> {
+  if (!heights) {
+    const { columns, rows } = SNAPSHOT_HEIGHTS;
+    const known = new Map<string, BlockHeight | null>([[DEMO_POSTAL, toHeight(SNAPSHOT_FACTS, DEMO_POSTAL)]]);
+    for (const r of rows) {
+      const record = Object.fromEntries(columns.map((c, i) => [c, r[i]]));
+      known.set(record.postal, toHeight(record, record.postal));
+    }
+    heights = known;
+  }
+  return heights;
 }

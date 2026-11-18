@@ -145,7 +145,8 @@ async function neighbourHeights(neighbours) {
     const row = rowOf.get(ref);
     if (row) {
       const uses = HEIGHT_FIELDS.slice(3).filter((c) => String(row[c]).trim().toUpperCase() === 'Y');
-      console.log(`  ${row.blk_no} ${row.street} (${ref.postal}): ${row.max_floor_lvl} storeys, ${uses.join(' and ') || 'no use flagged'}`);
+      const n = String(row.max_floor_lvl).trim();
+      console.log(`  ${row.blk_no} ${row.street} (${ref.postal}): ${n} ${n === '1' ? 'storey' : 'storeys'}, ${uses.join(' and ') || 'no use flagged'}`);
     } else {
       console.warn(`  postal ${ref.postal} (${ref.blk} ${ref.street || 'street unknown'}): no Property Information row, so the app draws it at a typical height`);
     }

@@ -1,18 +1,19 @@
 /**
- * Snapshot of Blk 440A CLEMENTI AVE 3 (postal 121440), taken 2026-11-14.
+ * Snapshot of Blk 440A CLEMENTI AVE 3 (postal 121440), taken 2026-11-18.
  * Written by scripts/build-demo.mjs from OneMap, data.gov.sg and the block
  * index; do not edit by hand, run `npm run demo`. src/lib/data/demo.ts turns
  * it into the same typed results the live lookups return.
  *
  * Contains information from HDB Property Information, Resale flat prices based on
- * registration date from Jan-2017 onwards and HDB Existing Building accessed on 14 November 2026
+ * registration date from Jan-2017 onwards and HDB Existing Building accessed on 18 November 2026
  * from data.gov.sg which is made available under the terms of the Singapore Open
- * Data Licence version 1.0 https://data.gov.sg/open-data-licence. Address from OneMap.
+ * Data Licence version 1.0 https://data.gov.sg/open-data-licence. Addresses and
+ * streets from OneMap.
  */
 
 import type { Shard } from './shard';
 
-export const SNAPSHOT_TAKEN = "2026-11-14T04:02:38.544Z";
+export const SNAPSHOT_TAKEN = "2026-11-18T05:31:33.895Z";
 
 /** The OneMap result for the address, as OneMap returned it. */
 export const SNAPSHOT_HIT: Record<string, string> = {"BLK_NO":"440A","ROAD_NAME":"CLEMENTI AVENUE 3","BUILDING":"ANANIAS CENTRE (CLEMENTI)","ADDRESS":"440A CLEMENTI AVENUE 3 ANANIAS CENTRE (CLEMENTI) SINGAPORE 121440","POSTAL":"121440","LATITUDE":"1.315998673983866","LONGITUDE":"103.7641976249758"};
@@ -75,5 +76,28 @@ export const SNAPSHOT_SHARD: Shard = {
     ["122440","440B","dn3mw8Z203Ip300Tb707Sl300Hb200t2W150d168q14k292X10RJ00t3Z300x2c210f1x160b1D05p2W200DA5k10A60MY306506Y320NA5k10A60EW205o2D00g1x190k1z26A62s4B07m1KC0Ic300a1w1805y230c1A04A"],
     ["122441","441B","j_2wx4WA_6iF-LZ1O9DHACGHCH67BLGOa1k1Tm3o138c2e18Hw7u33C-1U47A6MNS2W2W1AK3Me1Im1v3Y2UEVW3e1b5mBdOlBKd1G88HH7AJCDC6CPd1H5GRDVMh2n3B8f1p2FCz4b7A5d1v15459TANFd1x12PEDPZ1d4W3"],
     ["123440","440C","hi3ms9GZ4g2Ao270Z1-200FKB7l1B00Z2t300x2a206X1Z1009f340Fb100FT05X3c200Nu300Oa510Go300Ru300Ia20Fc4J009_210Af100Y1p100g1K00w4J00e1C6B00Uq440W1a206G7i2z100U37l30380NZ520Ln300Y1t300H"]
+  ]
+};
+
+/**
+ * How tall each of those neighbours is: its postal code, its road as OneMap
+ * names it, then its row in HDB Property Information as data.gov.sg returned
+ * it, in `columns` order; empty after the road where HDB has no row.
+ */
+export const SNAPSHOT_HEIGHTS = {
+  columns: ["postal","road","blk_no","street","max_floor_lvl","residential","commercial","market_hawker","multistorey_carpark","precinct_pavilion"],
+  rows: [
+    ["120319","CLEMENTI AVENUE 4","319","CLEMENTI AVE 4","10","Y","N","N","N","N"],
+    ["120320","CLEMENTI AVENUE 4","320","CLEMENTI AVE 4","10","Y","Y","N","N","N"],
+    ["120439","CLEMENTI AVENUE 3","439","CLEMENTI AVE 3","1","N","N","N","N","Y"],
+    ["120440","CLEMENTI AVENUE 3","440","CLEMENTI AVE 3","3","N","N","N","Y","N"],
+    ["120441","COMMONWEALTH AVENUE WEST","441","C'WEALTH AVE WEST","7","N","N","N","N","N"],
+    ["120442","CLEMENTI AVENUE 3","442","CLEMENTI AVE 3","4","Y","Y","N","N","N"],
+    ["120443","CLEMENTI AVENUE 3","443","CLEMENTI AVE 3","2","Y","Y","N","N","N"],
+    ["121318","CLEMENTI AVENUE 4","318A","CLEMENTI AVE 4","2","N","N","N","Y","N"],
+    ["121441","CLEMENTI AVENUE 3","441A","CLEMENTI AVE 3","40","Y","Y","N","N","N"],
+    ["122440","CLEMENTI AVENUE 3","440B","CLEMENTI AVE 3","40","Y","N","N","N","N"],
+    ["122441","CLEMENTI AVENUE 3","441B","CLEMENTI AVE 3","40","Y","N","N","N","N"],
+    ["123440","CLEMENTI AVENUE 3","440C","CLEMENTI AVE 3","40","Y","N","N","N","N"]
   ]
 };
