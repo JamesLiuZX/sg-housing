@@ -80,6 +80,12 @@ export interface Uniforms {
   uDay: THREE.IUniform<number>;
   /** The wall chosen in the rules lens, or -1. The others step back so it stands out. */
   uSel: THREE.IUniform<number>;
+  /**
+   * How much of the floor's baked contact shading is applied: 1 in the fast
+   * picture, 0 in the settled one, where the shadow of the studio dome, from
+   * the real geometry, takes its place.
+   */
+  uBaked: THREE.IUniform<number>;
 }
 
 /** Height in metres of a wall cut down so the camera can see past it. */
@@ -106,7 +112,8 @@ export function makeUniforms(walls: number, height: number): Uniforms {
     uBounce: { value: new THREE.Color(0, 0, 0) },
     uInside: { value: 0 },
     uDay: { value: 1 },
-    uSel: { value: -1 }
+    uSel: { value: -1 },
+    uBaked: { value: 1 }
   };
 }
 
@@ -289,10 +296,10 @@ export function shade<T extends THREE.Material>(mat: T, u: Uniforms, f: Features
   }
   if (f.foot) fLight += `blkAo *= mix(0.62, 1.0, smoothstep(-0.02, ${f.foot.toFixed(3)}, vBlkY));\n`;
   if (f.contact) {
-    Object.assign(uniforms, { uContactMap: { value: f.contact }, uPop: u.uPop });
-    fHead += 'uniform sampler2D uContactMap;\nuniform float uPop;\n';
+    Object.assign(uniforms, { uContactMap: { value: f.contact }, uPop: u.uPop, uBaked: u.uBaked });
+    fHead += 'uniform sampler2D uContactMap;\nuniform float uPop;\nuniform float uBaked;\n';
     // Furniture's shading arrives with the furniture and leaves with it.
-    fLight += 'vec2 blkC = texture2D(uContactMap, vMapUv).rg;\nblkAo *= blkC.r * mix(1.0, blkC.g, clamp(uPop, 0.0, 1.0));\n';
+    fLight += 'vec2 blkC = texture2D(uContactMap, vMapUv).rg;\nblkAo *= mix(1.0, blkC.r * mix(1.0, blkC.g, clamp(uPop, 0.0, 1.0)), uBaked);\n';
   }
   if (f.field) {
     Object.assign(uniforms, { uField: u.uField, uFieldRect: u.uFieldRect, uLamp: u.uLamp, uBounce: u.uBounce, uInside: u.uInside });

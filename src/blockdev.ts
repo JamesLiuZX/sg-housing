@@ -16,8 +16,11 @@
  *   ?inset=150        reserves room at the bottom, as the interface's controls do
  *   ?view=unit        turns the block to show the flat's side
  *   ?walk=living      once in the flat, stands in a room looking at its window (?walk=1 at the front door), with no flight in
+ *   ?samples=16       settles the still picture with exactly this many samples (headless software rendering
+ *                     draws about a frame a second; the device's own count is 48 on a desktop pointer, 32 on a
+ *                     coarse one, fewer on a slow device); ?quality=fast keeps the single fast pass
  *
- * window.blk drives it from tests: setTime, storey, unit, push, enter, exit, jump, plan, walk, verify, stats.
+ * window.blk drives it from tests: setTime, storey, unit, push, enter, exit, jump, plan, walk, verify, stats, settled.
  */
 import * as THREE from 'three';
 import { DEMO_POSTAL, facadeFacing, loadBlock, lookupDemo, type Block } from './lib/data';
@@ -78,6 +81,8 @@ function setTime(m: number, month = date.month): void {
   viewer.setSun(sunAt(d, m));
 }
 setTime(minutes);
+if (q.has('samples')) viewer.setSamples(num('samples', 0));
+if (q.get('quality') === 'fast') viewer.setQuality('fast');
 
 /** Stands the flat on the side looking closest to `bearing`, turning it to face that side. */
 function place(bearing: number, along = 0.5): void {
@@ -159,7 +164,9 @@ const api = {
     return viewer.enterWalk(view?.at, view?.lookAt, { now: true });
   },
   verify,
-  stats: () => viewer.renderStats()
+  stats: () => viewer.renderStats(),
+  /** Resolves once the picture has settled. */
+  settled: () => viewer.settled()
 };
 (window as unknown as { blk: typeof api }).blk = api;
 
