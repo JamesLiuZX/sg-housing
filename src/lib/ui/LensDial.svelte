@@ -75,6 +75,12 @@
   button.on {
     color: var(--surface);
   }
+  /* The dial's padding is no one else's, so each tab takes it: 52 px tall to the finger, 44 px to the eye. */
+  button::before {
+    content: '';
+    position: absolute;
+    inset: -4px 0;
+  }
   svg {
     flex: none;
   }

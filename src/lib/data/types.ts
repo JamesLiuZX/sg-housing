@@ -208,6 +208,43 @@ export interface BlockFacts {
   source: DataSource;
 }
 
+/**
+ * What a building is, from the flags HDB Property Information sets on it. A
+ * building with flats is `residential` whatever is at its base; otherwise it
+ * is named by its main use: a multi-storey car park (shops at its foot or
+ * not), a market or hawker centre, a commercial block, a precinct pavilion,
+ * or `other` (a bus interchange podium, a depot, ...).
+ */
+export type BuildingKind = 'residential' | 'carpark' | 'market' | 'commercial' | 'pavilion' | 'other';
+
+/** How tall a building near the chosen block stands, and what it is: what its shadow needs. */
+export interface BlockHeight {
+  postal: string;
+  /** As HDB writes it, e.g. "440B". */
+  blk: string;
+  /** Street as HDB spells it, e.g. "CLEMENTI AVE 3". */
+  street: string;
+  /** Highest floor level, as HDB records it; for a car park, its parking decks. */
+  storeys: number;
+  kind: BuildingKind;
+}
+
+/** The heights known for a block's neighbours: everything known so far, as a lookup reports it. */
+export interface NeighbourHeights {
+  /**
+   * Storeys by postal code, for the engine's `neighbourStoreys`. A neighbour
+   * left out has no answer yet and keeps the engine's typical height.
+   */
+  storeys: Record<string, number>;
+  /** The answers, nearest neighbour first. */
+  found: BlockHeight[];
+  /**
+   * Postal codes of neighbours that were asked about and have no answer:
+   * HDB has no record of them, or a service did not answer. Nearest first.
+   */
+  missing: string[];
+}
+
 /** One transaction from "Resale flat prices", as published: registration month, not completion. */
 export interface Resale {
   /** "2026-09". */

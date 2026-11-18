@@ -1,13 +1,12 @@
 <script lang="ts">
-  import { ms } from './motion';
-  import { monthYear, saleWords, soldRanges, storeyTag } from './place';
+  import { soldRanges } from './place';
   import type { Session } from './session.svelte';
 
   /**
    * The block's height as a scale you run a thumb along, the way a lift
    * panel reads: one tick a storey, every fifth longer, and a darker stroke
-   * where flats have been resold. Beside it the storey, set large, and the
-   * plain facts of the latest resale on that stretch of storeys.
+   * where flats have been resold. The storey it is on, and the resale facts
+   * there, are StoreyReadout's, at the foot of the scale.
    */
   let { session }: { session: Session } = $props();
 
@@ -16,11 +15,6 @@
   const low = $derived(session.lowest);
   const storey = $derived(session.storey);
   const sold = $derived(soldRanges(session.resales));
-  const sale = $derived(session.sales[0] ? saleWords(session.sales[0]) : null);
-  const others = $derived(Math.max(0, session.sales.length - 1));
-  const since = $derived(session.sales.length > 1 ? monthYear(session.sales[session.sales.length - 1].month) : '');
-  /** Whether the records in hand reach back to 2017, the start of the dataset, so "none" means none. */
-  const complete = $derived(!!session.resales && session.resales.total <= session.resales.recent.length);
 
   let rail = $state<HTMLElement>();
   let h = $state(0);
@@ -30,14 +24,10 @@
 
   let held = $state(false);
   let pointer: number | null = null;
-  /** Which way the numeral last moved, so the new number arrives from the direction of travel. */
-  let dir = $state(1);
 
   function set(next: number): void {
     const s = Math.min(n, Math.max(low, Math.round(next)));
-    if (s === storey) return;
-    dir = s > storey ? 1 : -1;
-    session.setStorey(s);
+    if (s !== storey) session.setStorey(s);
   }
 
   function at(clientY: number): number {
@@ -75,24 +65,6 @@
 </script>
 
 <div class="storeys">
-  <div class="readout" aria-live="polite">
-    <p class="cap num" aria-hidden="true">Storey</p>
-    <p class="numeral" aria-label="Storey {storey}">
-      {#key storey}
-        <span class="digits num" style:--dir={dir} style:--ms="{ms(260)}ms">{storeyTag(storey)}</span>
-      {/key}
-    </p>
-    {#if sale}
-      <p class="sale">
-        <span class="where num">{sale.where}</span>
-        <span class="what num">{sale.what}</span>
-        {#if others}<span class="also">{others} more on these storeys since {since}</span>{/if}
-      </p>
-    {:else if session.resales}
-      <p class="sale quiet">{complete ? 'No resales at this height since 2017' : 'No recent resales at this height'}</p>
-    {/if}
-  </div>
-
   <div
     class="rail"
     class:held
@@ -134,70 +106,9 @@
 <style>
   .storeys {
     display: flex;
-    align-items: stretch;
-    gap: 2px;
+    justify-content: flex-end;
     height: 100%;
     pointer-events: none;
-  }
-
-  .readout {
-    align-self: center;
-    display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-    text-align: right;
-    max-width: 196px;
-    text-shadow:
-      0 0 2px var(--surface),
-      0 0 6px var(--surface),
-      0 0 14px rgb(var(--surface-rgb) / 0.85);
-  }
-  .cap {
-    font-size: 10px;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    color: var(--ink-2);
-  }
-  /* One cell for the old and new numbers, so the swap never shifts the words under it. */
-  .numeral {
-    display: grid;
-    justify-items: end;
-    overflow: hidden;
-    margin: 2px -4px 0 0;
-    padding-right: 4px;
-  }
-  .digits {
-    grid-area: 1 / 1;
-    font: 700 64px/0.9 var(--font-mark);
-    letter-spacing: -0.01em;
-    font-feature-settings: 'tnum' 1;
-    animation: storey-in var(--ms, 260ms) var(--spring-snappy) both;
-  }
-  @keyframes storey-in {
-    from {
-      opacity: 0;
-      transform: translateY(calc(var(--dir) * 38%));
-    }
-  }
-  .sale {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-    gap: 1px;
-    margin-top: 6px;
-    font-size: 11.5px;
-    line-height: 1.3;
-    animation: fade-in 240ms var(--ease-out) both;
-  }
-  .what {
-    color: var(--ink-2);
-  }
-  .also,
-  .quiet {
-    margin-top: 3px;
-    font-size: 11px;
-    color: var(--ink-2);
-    text-wrap: balance;
   }
 
   .rail {
@@ -258,17 +169,5 @@
   .lead {
     stroke: var(--ink);
     stroke-width: 1;
-  }
-
-  @media (min-width: 820px) {
-    .digits {
-      font-size: 88px;
-    }
-    .readout {
-      max-width: 240px;
-    }
-    .sale {
-      font-size: 12.5px;
-    }
   }
 </style>

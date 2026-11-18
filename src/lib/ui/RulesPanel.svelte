@@ -7,6 +7,12 @@
    * The Rules lens: the colour key, and when a wall is chosen, what HDB says
    * about it. Choosing and clearing both go through the engine, so the
    * highlight on the model and this sheet can never disagree.
+   *
+   * On a phone the verdict has to leave the model room above it, so it is set
+   * tight: the wall and the way through the walls on one row, the answer as a
+   * stamp, two lines of reason, the caveat on one line, and the sources. The
+   * colour key steps aside while a wall is chosen, since the stamp carries
+   * that wall's colour and words; it returns when the wall is closed.
    */
   let {
     session,
@@ -93,15 +99,14 @@
             <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="m7 4 5 5-5 5" /></svg>
           </button>
         </div>
+        <ul class="legend" aria-label="Wall colours">
+          {#each LEGEND as k (k.tone)}
+            <li><span class="key" data-tone={k.tone} aria-hidden="true"></span>{k.label}</li>
+          {/each}
+        </ul>
       {/if}
     </div>
   </div>
-
-  <ul class="legend" aria-label="Wall colours">
-    {#each LEGEND as k (k.tone)}
-      <li><span class="key" data-tone={k.tone} aria-hidden="true"></span>{k.label}</li>
-    {/each}
-  </ul>
 </section>
 
 <style>
@@ -137,7 +142,7 @@
     transition: height 420ms var(--ease-out);
   }
   .inner {
-    padding: 10px 0 8px;
+    padding: 8px 0 6px;
   }
 
   /* ── Nothing chosen ── */
@@ -146,7 +151,7 @@
     align-items: center;
     justify-content: space-between;
     gap: 8px;
-    margin: -6px -6px -4px 0;
+    margin: -6px -6px 0 0;
   }
   .prompt p {
     font-size: 14px;
@@ -217,8 +222,8 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    margin-top: 9px;
-    padding: 6px 12px 6px 9px;
+    margin-top: 8px;
+    padding: 5px 12px 5px 9px;
     border-radius: 999px;
     background: var(--tone-deep);
     color: #fff;
@@ -252,15 +257,15 @@
   }
 
   .why {
-    margin-top: 8px;
-    font-size: 13.5px;
-    line-height: 1.38;
+    margin-top: 7px;
+    font-size: 13px;
+    line-height: 1.36;
     text-wrap: pretty;
   }
   .caveat {
-    margin-top: 6px;
-    font-size: 12px;
-    line-height: 1.35;
+    margin-top: 5px;
+    font-size: 11.5px;
+    line-height: 1.3;
     color: var(--ink-2);
   }
   .sources {
@@ -268,12 +273,14 @@
     flex-wrap: wrap;
     column-gap: 18px;
   }
+  /* 44 px to the finger, in a 34 px row: the extra reaches into the space above and below, which holds no other control. */
   .sources a {
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    min-height: 34px;
-    font-size: 12.5px;
+    min-height: 44px;
+    margin: -5px 0;
+    font-size: 12px;
     font-weight: 500;
     text-decoration: underline;
     text-decoration-color: var(--line);
@@ -298,7 +305,8 @@
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 5px 12px;
-    padding: 9px 0 11px;
+    margin-top: 2px;
+    padding: 9px 0 5px;
     border-top: 0.5px solid var(--line-soft);
     font-size: 12px;
     color: var(--ink-2);

@@ -162,6 +162,12 @@
   .arc.held {
     cursor: grabbing;
   }
+  /* The compact strip is 40 px to the eye; the pill's padding round it is no one else's, so the finger gets 52. */
+  .arc.compact::before {
+    content: '';
+    position: absolute;
+    inset: -6px 0;
+  }
   svg {
     display: block;
     overflow: visible;

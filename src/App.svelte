@@ -6,6 +6,7 @@
   import BlockStage from './lib/ui/BlockStage.svelte';
   import Dock from './lib/ui/Dock.svelte';
   import Landing from './lib/ui/Landing.svelte';
+  import { ms } from './lib/ui/motion';
   import { readParams } from './lib/ui/params';
   import { roomView } from './lib/ui/pins';
   import { roadName } from './lib/ui/place';
@@ -27,6 +28,8 @@
   const reduced = !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
   /** The block stage opens in late-afternoon light, when the shadows are long and west sun matters. */
   const ARRIVAL_MINUTES = 17 * 60 + 15;
+  /** How long the engine takes to ease the model to new insets (Viewer.setInsets), ms. */
+  const INSETS_EASE = 500;
   /** What a link asks for on arrival at its block. */
   const asked: Arrival = { storey: params.storey, side: params.side, type: params.type, mirrored: params.mirror };
 
@@ -47,6 +50,7 @@
   let posterH = $state(0);
   let blockBottom = $state(0);
   let blockLeft = $state(0);
+  let blockTop = $state(0);
   /** True once the camera has landed inside after walking in. */
   let landed = $state(false);
   const wide = $derived(vw >= 820);
@@ -57,14 +61,26 @@
   let lookup: AbortController | null = null;
   let arrivals = 0;
 
-  /** Room the dock will take before it has been measured, so the first camera move lands close. */
-  const dockGuess = (lens: Lens = session.lens) =>
-    lens === 'sun' ? (wide ? 392 : 358) : lens === 'rules' ? (wide ? 168 : 196) : wide ? 150 : 148;
-  /** Room the block stage's controls take, before they have been measured. */
-  const blockGuess = () => blockBottom || (wide ? 72 : 260);
+  /** Room the dock will take before it has been measured, so the first camera move lands close. A wall's verdict is the Rules sheet's taller state. */
+  const dockGuess = (lens: Lens = session.lens, verdict = !!session.wall || !!params.wall) =>
+    lens === 'sun' ? (wide ? 392 : 358) : lens === 'rules' ? (verdict ? (wide ? 236 : 300) : wide ? 168 : 196) : wide ? 150 : 148;
+  /** Room the block stage's controls take, before they have been measured: along the bottom, and on a phone, across the top. */
+  const blockGuess = () => blockBottom || (wide ? 120 : 334);
+  const blockTopGuess = () => (wide ? 0 : blockTop || 132);
 
   /** The inset the model was last fitted to. A big change in the dock re-fits the model; a small one only slides it. */
   let fitted = 0;
+  /**
+   * Set when a wall's verdict opens or closes: the Rules sheet then grows or
+   * shrinks under a person who has most likely zoomed in to tap that wall,
+   * so the model only slides with it and keeps their view. A lens change,
+   * which frames the model afresh anyway, clears it.
+   */
+  let keepView = false;
+  /** The screen size the explore insets were last worked out for. */
+  let framedFor = '';
+  /** The block stage's insets the block was last framed for; null when it is next to be framed afresh. */
+  let blockFramed: { bottom: number; top: number } | null = null;
   /** The storey the block last reported, so it is not sent straight back. */
   let heard = 0;
 
@@ -75,6 +91,7 @@
       else if (m === 'doll' && session.stage === 'walk') session.stage = 'explore';
     },
     wall: (w) => {
+      if (session.stage === 'explore' && dockH > 0 && !w !== !session.wall) keepView = true;
       session.wall = w;
     },
     atmosphere: (day, gold) => atmosphere?.set(day, gold),
@@ -124,19 +141,24 @@
       showSite(v);
       if (session.stage === 'explore') {
         land(v);
-        if (params.walk) walkInto(params.walk === '1' ? null : params.walk);
+        linked(v);
       }
     } else if (params.postal) {
       void v.showPlan();
       void arriveFromLink();
     } else if (params.skip || reduced) {
       land(v);
-      const wall = params.wall ? session.plan.walls.find((w) => w.id === params.wall) : null;
-      if (wall) v.select(wall);
-      if (params.walk) walkInto(params.walk === '1' ? null : params.walk);
+      linked(v);
     } else {
       void v.showPlan();
     }
+  }
+
+  /** On the finished model at the end of a link: the wall it names, or the room it walks into. */
+  function linked(v: Viewer): void {
+    const wall = params.wall ? session.plan.walls.find((w) => w.id === params.wall) : null;
+    if (wall) v.select(wall);
+    if (params.walk) walkInto(params.walk === '1' ? null : params.walk);
   }
 
   /** Straight onto the finished model; from the block, where the push-in would have ended. */
@@ -157,7 +179,11 @@
     const before = viewer.lens;
     viewer.setLens(session.lens);
     // A lens change re-fits against the insets in force; the new panel's height arrives a frame later.
-    if (viewer.lens !== before) fitted = untrack(() => dockH) + 6;
+    // (Leaving the Rules lens clears its wall on the way, which is not the person closing a verdict.)
+    if (viewer.lens !== before) {
+      fitted = untrack(() => dockH) + 6;
+      keepView = false;
+    }
   });
   // A new flat type or its mirror, swapped in place, wherever the viewer is.
   $effect(() => {
@@ -190,10 +216,25 @@
       if (wide) viewer.setInsets(0, Math.round(Math.min(640, Math.max(400, vw * 0.44))));
       else viewer.setInsets(posterH, 0);
     } else if (session.stage === 'block' && blockBottom > 0) {
-      viewer.setInsets(blockBottom, wide ? blockLeft : 0);
+      // On a phone the words take a band across the top, and the block is framed below it.
+      const left = wide ? blockLeft : 0;
+      const top = wide ? 0 : blockTop;
+      // The first measure and a big change, such as a turned phone, frame the block afresh; a small change slides it.
+      if (!blockFramed || Math.abs(blockBottom - blockFramed.bottom) + Math.abs(top - blockFramed.top) > 48) {
+        viewer.fitInsets(blockBottom, left, top);
+        blockFramed = { bottom: blockBottom, top };
+      } else {
+        viewer.setInsets(blockBottom, left, top);
+      }
     } else if (session.stage === 'explore' && dockH > 0) {
       const inset = dockH + 6;
-      if (Math.abs(inset - fitted) > 48) {
+      // A turned phone is a new screen, framed afresh whatever the sheet was doing.
+      const screen = `${vw}x${vh}`;
+      if (screen !== framedFor) {
+        framedFor = screen;
+        keepView = false;
+      }
+      if (!keepView && Math.abs(inset - fitted) > 48) {
         viewer.fitInsets(inset, 0);
         fitted = inset;
       } else {
@@ -271,14 +312,28 @@
     if (!viewer) return;
     viewer.setPlan(session.plan);
     showSite(viewer);
-    if (session.stage === 'explore') land(viewer);
+    if (session.stage === 'explore') {
+      land(viewer);
+      linked(viewer);
+    }
   }
 
   function showSite(v: Viewer): void {
     const block = session.block;
     if (!block) return;
     v.setBearing(session.bearing);
-    v.showBlock({ block, storeys: session.storeys, label: block.blk }, blockGuess());
+    const bottom = blockGuess();
+    const top = blockTopGuess();
+    // The block is framed for the insets in force. From the poster those are the poster's, so the block stage's go in
+    // first and the block is right from its first frame; from the flat they are the flat's, and the first measure fixes them.
+    // A link straight into the flat skips the block stage and its band.
+    if (v.mode === 'plan' && session.stage === 'block') {
+      v.setInsets(bottom, 0, top);
+      blockFramed = { bottom, top };
+    } else {
+      blockFramed = null;
+    }
+    v.showBlock({ block, storeys: session.storeys, label: block.blk }, bottom);
     heard = session.storey;
     v.setStorey(session.storey);
     if (session.facade) v.setUnit({ storey: session.storey, facade: session.facade, along: session.along });
@@ -288,6 +343,13 @@
     if (!viewer || session.stage !== 'block' || !session.facade) return;
     session.stage = 'entering';
     fitted = dockGuess();
+    // The push carries the insets in force into the flat, which has no band across the top. So as the band's words
+    // fade, the block first takes the room they leave, over the time the engine eases a change of insets.
+    if (!wide && blockTop > 0) {
+      viewer.setInsets(blockBottom, 0, 0);
+      await new Promise((done) => setTimeout(done, ms(INSETS_EASE)));
+      if (!viewer || session.stage !== 'entering') return;
+    }
     if (reduced) viewer.jump(fitted);
     else await viewer.enterFlat(fitted);
     if (session.stage === 'entering') session.stage = 'explore';
@@ -296,9 +358,8 @@
   async function backToBlock(): Promise<void> {
     if (!viewer || session.stage !== 'explore' || !session.place) return;
     session.wall = null;
-    // The Sun lens may have turned the flat; in its block it faces the side that was chosen.
-    session.orient();
     session.stage = 'leaving';
+    blockFramed = null;
     if (reduced) showSite(viewer);
     else await viewer.exitToBlock(blockGuess());
     if (session.stage === 'leaving') session.stage = 'block';
@@ -358,6 +419,7 @@
         leaving={session.stage === 'entering'}
         bind:bottom={blockBottom}
         bind:left={blockLeft}
+        bind:top={blockTop}
         onenter={() => void enter()}
         onback={backToSearch}
       />

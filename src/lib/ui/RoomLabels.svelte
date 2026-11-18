@@ -18,6 +18,11 @@
    * then go in only where they touch nothing. On a phone in the Sun lens the
    * hours appear for one room, the lit one nearest the middle of the view;
    * the rest carry a sun dot. Zoom in and more comes back.
+   *
+   * A name is about 15 px tall, too small to aim a finger at, and giving each
+   * label a 44 px box would crowd most of them out. So each label has a
+   * target under it: at least 44 px square, centred on the name, painted
+   * below every label so where two targets meet a visible name still wins.
    */
   let {
     viewer,
@@ -39,6 +44,9 @@
   // svelte-ignore state_referenced_locally
   const anchors = viewer.anchors;
   const els: (HTMLElement | undefined)[] = [];
+  const pads: (HTMLElement | undefined)[] = [];
+  /** Padding round a name inside its button, px each side. */
+  const PAD = 8;
   /** Measured size of each label's name [0] and second line [1]. The padding round them only enlarges the target. */
   const size = anchors.map(() => [
     { w: 0, h: 0 },
@@ -112,9 +120,15 @@
     for (let i = 0; i < anchors.length; i++) {
       const el = els[i];
       if (!el) continue;
-      el.style.transform = `translate3d(${at[i].x.toFixed(1)}px, ${at[i].y.toFixed(1)}px, 0) translate(-50%, -50%)`;
+      const move = `translate3d(${at[i].x.toFixed(1)}px, ${at[i].y.toFixed(1)}px, 0) translate(-50%, -50%)`;
+      el.style.transform = move;
       el.toggleAttribute('data-off', state[i] === 0);
       el.toggleAttribute('data-lean', state[i] === 1);
+      const pad = pads[i];
+      if (pad) {
+        pad.style.transform = move;
+        pad.toggleAttribute('data-off', state[i] === 0);
+      }
     }
   }
 
@@ -175,16 +189,35 @@
     for (const e of entries) {
       const which = parts.get(e.target);
       const el = e.target as HTMLElement;
-      if (which) size[which[0]][which[1]] = { w: el.offsetWidth, h: el.offsetHeight };
+      if (!which) continue;
+      size[which[0]][which[1]] = { w: el.offsetWidth, h: el.offsetHeight };
+      if (which[1] === 0) fitPad(which[0]);
     }
     place();
   });
+
+  /** A target as wide as its label's button, and never smaller than a fingertip. */
+  function fitPad(i: number): void {
+    const n = size[i][0];
+    pads[i]?.style.setProperty('--w', `${Math.max(44, n.w + 2 * PAD)}px`);
+    pads[i]?.style.setProperty('--h', `${Math.max(44, n.h + 2 * PAD)}px`);
+  }
 
   function track(i: number) {
     return (el: HTMLElement) => {
       els[i] = el;
       return () => {
         if (els[i] === el) els[i] = undefined;
+      };
+    };
+  }
+
+  function trackPad(i: number) {
+    return (el: HTMLElement) => {
+      pads[i] = el;
+      fitPad(i);
+      return () => {
+        if (pads[i] === el) pads[i] = undefined;
       };
     };
   }
@@ -220,6 +253,12 @@
 </script>
 
 <div class="labels" class:hidden inert={hidden} aria-hidden={hidden}>
+  <!-- All the targets first, so every label is painted above every target. Each does what its label's button does;
+       the button is the one keys and screen readers reach. -->
+  {#each anchors as a, i (a.id)}
+    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+    <span class="pad" data-off {@attach trackPad(i)} onclick={() => onpick(a.id)} aria-hidden="true"></span>
+  {/each}
   {#each anchors as a, i (a.id)}
     {@const isLit = session.lens === 'sun' && session.lit.includes(a.id)}
     <button
@@ -263,6 +302,7 @@
     position: absolute;
     top: 0;
     left: 0;
+    /* PAD in the script, which sizes the target under the label from it. */
     padding: 8px;
     border-radius: 12px;
     pointer-events: auto;
@@ -276,6 +316,21 @@
     pointer-events: none;
     transition: none;
   }
+  /* The fingertip target, sized in fitPad and moved with its label. Nothing to see. */
+  .pad {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: var(--w, 44px);
+    height: var(--h, 44px);
+    border-radius: 14px;
+    pointer-events: auto;
+    cursor: pointer;
+    will-change: transform;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .pad[data-off],
+  .hidden .pad,
   .hidden .label {
     pointer-events: none;
   }

@@ -189,9 +189,9 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    /* A tall target round a line of text, without moving the text. */
-    padding: 12px 0;
-    margin: -12px 0;
+    /* A 44 px target round a line of text, without moving the text. */
+    padding: 14px 0;
+    margin: -14px 0;
     text-decoration: underline;
     text-decoration-color: var(--line);
     text-underline-offset: 3px;

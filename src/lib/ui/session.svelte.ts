@@ -95,6 +95,12 @@ export class Session {
   /** Recent resales on the chosen storey's range, newest first. */
   readonly sales = $derived(salesAt(this.resales, this.storey));
 
+  /**
+   * A flat placed on a side of a real block faces the way that side does, so
+   * it cannot be turned; only the typical flat has a compass.
+   */
+  readonly placed = $derived(!!this.place && !!this.facade);
+
   readonly template: Template = $derived(this.candidate?.template ?? TYPICAL);
   readonly plan: Plan = $derived(this.mirrored ? mirror(this.template.plan) : this.template.plan);
 
@@ -215,8 +221,9 @@ export class Session {
     this.month = ((Math.round(month) % 12) + 12) % 12;
   }
 
-  /** Turns the flat. Takes the bearing of the top of the plan. */
+  /** Turns the typical flat. Takes the bearing of the top of the plan. A placed flat keeps the side it was given. */
   turn(bearing: number): void {
+    if (this.placed) return;
     this.bearing = ((Math.round(bearing) % 360) + 360) % 360;
   }
 

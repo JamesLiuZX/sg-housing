@@ -15,8 +15,9 @@
  *   ?go=1             plays the push-in; ?skip=1 skips every animation (the same as ?flat=1 with ?go=1)
  *   ?inset=150        reserves room at the bottom, as the interface's controls do
  *   ?view=unit        turns the block to show the flat's side
+ *   ?walk=living      once in the flat, stands in a room looking at its window (?walk=1 at the front door), with no flight in
  *
- * window.blk drives it from tests: setTime, storey, unit, push, enter, exit, jump, plan, verify, stats.
+ * window.blk drives it from tests: setTime, storey, unit, push, enter, exit, jump, plan, walk, verify, stats.
  */
 import * as THREE from 'three';
 import { DEMO_POSTAL, facadeFacing, loadBlock, lookupDemo, type Block } from './lib/data';
@@ -29,6 +30,7 @@ import { templateById, templates } from './lib/plan/templates';
 import type { Plan } from './lib/plan/types';
 import { dayPath, sunAt, type SunDate } from './lib/sg/solar';
 import { Atmosphere } from './lib/ui/atmosphere';
+import { roomView } from './lib/ui/pins';
 
 const q = new URLSearchParams(location.search);
 const num = (k: string, d: number) => (q.has(k) ? Number(q.get(k)) : d);
@@ -151,6 +153,11 @@ const api = {
     plan = planFor(id, flip);
     viewer.setPlan(plan);
   },
+  /** Stands in a room of the flat, looking at its window, with no flight in. From the dollhouse. */
+  walk(room: string | null) {
+    const view = room ? roomView(plan, room) : null;
+    return viewer.enterWalk(view?.at, view?.lookAt, { now: true });
+  },
   verify,
   stats: () => viewer.renderStats()
 };
@@ -169,5 +176,7 @@ void (async () => {
   if (hold !== null) viewer.scrubPush(Number(hold), inset);
   else if (q.get('flat') === '1' || (skip && q.get('go') === '1')) viewer.jump(inset);
   else if (q.get('go') === '1') await viewer.enterFlat(inset);
+  const walk = q.get('walk');
+  if (walk && viewer.mode === 'doll') await api.walk(walk === '1' ? null : walk);
   api.ready = true;
 })();

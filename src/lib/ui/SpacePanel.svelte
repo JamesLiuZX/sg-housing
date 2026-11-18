@@ -59,4 +59,10 @@
   .seg button.on {
     color: var(--ink);
   }
+  /* The switch's padding is no one else's, so each half takes it: 48 px tall to the finger, 40 px to the eye. */
+  .seg button::before {
+    content: '';
+    position: absolute;
+    inset: -4px 0;
+  }
 </style>

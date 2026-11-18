@@ -10,9 +10,11 @@ import { buildFlat, type Built, type RoomAnchor } from './build';
 import { BOUNCE_SCALE } from './field';
 import { PAL, col, cutTop, installToneMapping, makeUniforms, type Uniforms } from './materials';
 import { Nav, type P2 } from './nav';
+import { Outdoors } from './outdoors';
 import { placeSite, type Unit } from './placement';
-import { GROUND, STOREY, buildSite, floorY, storeyAt, type BlockSite, type SiteModel } from './site';
+import { GROUND, PLATE, PLATE_INSIDE, STAGE_HAZE, STOREY, buildSite, floorY, storeyAt, type BlockSite, type SiteModel } from './site';
 import { skyStops } from './sky';
+import { litFaces } from './sunlit';
 import { Tweens, clamp, ease, lerp, smooth } from './tween';
 
 export type { BlockSite } from './site';
@@ -70,8 +72,47 @@ const PUSH_TIME = 3.6;
 const SITE_SOFT = 0.45;
 /** How far round from the facade's normal the push-in arrives, so the dollhouse is seen three-quarter on. */
 const ARRIVE_TURN = 0.5;
+/**
+ * What it is worth to the arrival view to see the painted block number, in
+ * the units of its other wants (a whole block hidden is 1, a quarter turn off
+ * the ideal angle 0.5): enough to swing it a few tens of degrees.
+ */
+const NUMBER_SEEN = 0.6;
 /** The sun on the site against the sun in the flat: the blocks are white card far from the camera, and would bleach. */
 const SITE_SUN = 0.45;
+/** Seconds for the view out of the windows to clear once the walk has landed. */
+const OUTSIDE_TIME = 0.9;
+/**
+ * Haze on the site seen from inside: its strength, and the distances it
+ * starts and reaches that strength at, metres. Light enough that the nearer
+ * blocks keep their tone and the ground stays darker than the sky until a
+ * few degrees under the horizon, which is what makes a horizon read.
+ */
+const WALK_HAZE = 0.42;
+const WALK_HAZE_NEAR = 50;
+const WALK_HAZE_FAR = 700;
+/** How far round the flat its own block is left out, seen from inside: clear of the outer walls, slabs and ledges. Metres. */
+const HIDE_MARGIN = 0.4;
+/** Width of the edge of a block's shadow seen from inside, metres. */
+const WALK_SITE_SOFT = 0.5;
+/**
+ * The Sun lens turns toward the sun's side as the sun drops: not at all above
+ * the higher altitude, fully below the lower one, radians. In between, its
+ * patches move off the floor and up the walls that face the sun.
+ */
+const LOW_SUN_HIGH = 34 * (Math.PI / 180);
+const LOW_SUN_LOW = 16 * (Math.PI / 180);
+/**
+ * It looks almost along the sun's own bearing, where most of the light
+ * inside is in view (on the hero flat at 6:15 pm in June, five to ten times
+ * what either view of the arc side on shows), just off it so the sun's
+ * marker does not sit on the facade.
+ */
+const LOW_SUN_OFF = 12 * (Math.PI / 180);
+/** And it turns no further than this from the view that shows the day's arc side on, whichever side that is. */
+const LOW_SUN_TURN = 110 * (Math.PI / 180);
+/** Seconds for the view to catch up with the sun as it is dragged: the time constant of an eased follow. */
+const SUN_FOLLOW = 0.45;
 
 /** The two ends of the push-in: the block view and the dollhouse view, each as an orbit about a target. */
 interface PushPlan {
@@ -192,7 +233,24 @@ export class Viewer {
   private scrub: IntroPlan | null = null;
   /** Sun direction the light field's bounce was last spread for. */
   private bounceDir = new THREE.Vector3(0, -1, 0);
+  /** The haze the far blocks fade into: the page behind the block on the stage, the horizon seen from inside. */
   private fogColour = new THREE.Color();
+  private glowColour = new THREE.Color();
+  /** The sky and the site's own shadow, for the view out of the windows. */
+  private outdoors: Outdoors;
+  /** How clear the view out of the windows is: 0 in the dollhouse, 1 once a walk has landed. */
+  private outsideK = 0;
+  /** The site's own shadow map needs drawing again, because the sun or the site has moved. */
+  private siteShadowDirty = true;
+  /** Per wall, whether its left and right faces have the sun on them; worked out when the Sun lens needs it. */
+  private lit: Uint8Array = new Uint8Array(0);
+  private litDirty = true;
+  /** The Sun lens still chooses the view's angle; false from the moment the person turns it themselves. */
+  private sunSteer = false;
+  /** The azimuth that shows the day's arc side on, which the Sun lens turns from as the sun drops. */
+  private sunBase = 0;
+  /** The sun has moved, and the Sun lens's view is catching up. */
+  private sunChase = false;
 
   private compass = new THREE.Group();
   private compassMats: { mat: THREE.Material & { opacity: number }; base: number }[] = [];
@@ -213,6 +271,8 @@ export class Viewer {
   private h = 1;
   private pad = 0;
   private padX = 0;
+  /** Screen taken by interface at the top, CSS pixels: a phone's header. */
+  private padTop = 0;
   private flying = false;
   private introRunning = false;
   private dirty = true;
@@ -248,11 +308,15 @@ export class Viewer {
   private siteSpec: BlockSite | null = null;
   /** Site frame to world, as last applied. Kept apart from the site so a rebuilt site lands where the old one was. */
   private siteMatrix = new THREE.Matrix4();
+  /** World to the site frame. */
+  private siteInverse = new THREE.Matrix4();
   private unit: Unit | null = null;
   /** The marked storey, 0 for none. */
   private marked = 0;
   /** The flat's outline on its storey: a patch on the facade, and the volume seen through the block. */
   private ghost: THREE.Group | null = null;
+  /** How far the lamps are on, 0 by day to 1 at night, as the light was last set. */
+  private lampsK = 0;
   /** 0 at the flat's scale, 1 at the site's: blends the shadow fit and the depth range between them. */
   private siteW = 0;
   /** The flat's table shadow, faded out while the flat stands in its block. */
@@ -302,6 +366,8 @@ export class Viewer {
     this.scene.add(this.fill);
     const s = this.sunLight.shadow;
     this.coarse = !!window.matchMedia?.('(pointer: coarse)').matches;
+    this.outdoors = new Outdoors(this.coarse ? 1024 : 2048);
+    this.scene.add(this.outdoors.sky);
     s.mapSize.set(this.coarse ? 1536 : 2048, this.coarse ? 1536 : 2048);
     s.bias = -0.0003;
     // Enough to lift a receiver clear of its own depth across the whole width of the soft filter.
@@ -333,6 +399,11 @@ export class Viewer {
     this.controls.maxPolarAngle = 1.42;
     this.controls.target.copy(this.target);
     this.controls.addEventListener('change', () => (this.dirty = true));
+    // Only a person starts an orbit: from then on the Sun lens leaves the angle to them.
+    this.controls.addEventListener('start', () => {
+      this.sunSteer = false;
+      this.sunChase = false;
+    });
 
     canvas.addEventListener('pointerdown', this.onDown);
     canvas.addEventListener('pointermove', this.onMove);
@@ -450,8 +521,9 @@ export class Viewer {
     const right = new THREE.Vector3(Math.cos(theta), 0, -Math.sin(theta));
     const up = new THREE.Vector3().crossVectors(right, fwd);
     const t = Math.tan((DOLL_FOV * DEG) / 2);
-    const tanV = ((t * (this.h - this.pad)) / (this.h + this.pad)) * margin;
-    const tanH = ((t * (this.w - this.padX)) / (this.h + this.pad)) * margin;
+    const tall = this.virtualH;
+    const tanV = ((t * (this.h - this.pad - this.padTop)) / tall) * margin;
+    const tanH = ((t * (this.w - this.padX)) / tall) * margin;
     const c = new THREE.Vector3();
     const xs = pts.map((p) => Math.abs(c.copy(p).sub(base).dot(right)));
     const ys = pts.map((p) => c.copy(p).sub(base).dot(up));
@@ -529,12 +601,24 @@ export class Viewer {
     this.camera.updateProjectionMatrix();
   }
 
+  /**
+   * Height of the image the camera renders, of which the canvas shows a
+   * window: taller than the canvas by the difference of the bottom and top
+   * insets, so its centre falls in the middle of the free space between them.
+   */
+  private get virtualH(): number {
+    return this.h + Math.abs(this.pad - this.padTop);
+  }
+
   private applyView(): void {
     const pad = this.pad;
     const padX = this.padX;
-    if (pad > 0.5 || padX > 0.5) {
-      this.camera.aspect = (this.w + padX) / (this.h + pad);
-      this.camera.setViewOffset(this.w + padX, this.h + pad, 0, pad, this.w, this.h);
+    const top = this.padTop;
+    if (pad > 0.5 || padX > 0.5 || top > 0.5) {
+      const tall = this.virtualH;
+      this.camera.aspect = (this.w + padX) / tall;
+      // The window sits low in the taller image for a bottom inset, high in it for a top one.
+      this.camera.setViewOffset(this.w + padX, tall, 0, Math.max(0, pad - top), this.w, this.h);
     } else {
       this.camera.clearViewOffset();
       this.camera.aspect = this.w / this.h;
@@ -543,15 +627,20 @@ export class Viewer {
     this.dirty = true;
   }
 
-  /** Screen space taken by interface at the bottom and left, in CSS pixels. The model centres in what is left. */
-  setInsets(bottom: number, left = 0): void {
+  /**
+   * Screen space taken by interface at the bottom, left and top, in CSS
+   * pixels. The model centres in what is left. Leaving out `top` means none.
+   */
+  setInsets(bottom: number, left = 0, top = 0): void {
     if (this.mode === 'walk' || this.introRunning || this.pushing) return;
     const b0 = this.pad;
     const l0 = this.padX;
-    if (Math.abs(b0 - bottom) < 1 && Math.abs(l0 - left) < 1) return;
+    const t0 = this.padTop;
+    if (Math.abs(b0 - bottom) < 1 && Math.abs(l0 - left) < 1 && Math.abs(t0 - top) < 1) return;
     if (this.mode === 'plan') {
       this.pad = bottom;
       this.padX = left;
+      this.padTop = top;
       this.applyView();
       const a = this.planAngles();
       this.setOrbit(a.theta, a.phi, this.fit(a.theta, a.phi, 0.8));
@@ -559,12 +648,13 @@ export class Viewer {
     }
     // The sun's controls are tall on a phone, so its dome is framed again for the room they leave.
     if (this.lens === 'sun' && this.mode === 'doll') {
-      this.reframe(bottom, left, 0.5);
+      this.reframe(bottom, left, 0.5, top);
       return;
     }
     void this.tweens.run('pad', 0.5, (k) => {
       this.pad = lerp(b0, bottom, k);
       this.padX = lerp(l0, left, k);
+      this.padTop = lerp(t0, top, k);
       this.applyView();
     });
   }
@@ -729,13 +819,17 @@ export class Viewer {
     if (c0 !== c1) void this.tweens.run('compass', 0.6, (k) => this.setCompass(lerp(c0, c1, k)));
     this.syncFurniture();
     if (lens !== 'rules') this.select(null);
+    // Choosing the Sun lens hands it the angle again, until the person next turns the view.
+    this.sunSteer = lens === 'sun';
+    this.sunChase = false;
     if (this.mode === 'doll') this.reframe();
   }
 
   private setCompass(k: number): void {
     this.compassShow = k;
     for (const { mat, base } of this.compassMats) mat.opacity = base * k;
-    this.compass.visible = k > 0.01 && this.mode !== 'block';
+    // Out of the windows the real sky has its own sun; the ring is the dollhouse's.
+    this.compass.visible = k > 0.01 && this.mode !== 'block' && this.outsideK < 0.5;
     this.placeSunMarker();
     this.dirty = true;
   }
@@ -768,22 +862,74 @@ export class Viewer {
   }
 
   /**
+   * The azimuth the Sun lens wants for the sun as it is now, turning from
+   * `base`, the view of the day's arc side on. With the sun high its light
+   * lies on the floors near the windows, seen from any side, so the arc is
+   * shown square. As the sun drops the light climbs the far walls of the
+   * rooms it reaches, and those face the sun, so the view turns round to the
+   * sun's side to look along its light, by no more than LOW_SUN_TURN.
+   */
+  private sunAzimuth(base: number): number {
+    const alt = this.sun.altitude;
+    const low = 1 - smooth(LOW_SUN_LOW, LOW_SUN_HIGH, alt);
+    if (low <= 0 || alt < -0.02) return base;
+    const d = this.sunDir();
+    const sunAz = Math.atan2(d.x, d.z);
+    const wrap = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
+    // Just off the sun's line, on whichever side of it the view already is.
+    const side = wrap(base - sunAz) >= 0 ? 1 : -1;
+    const turn = clamp(wrap(sunAz + side * LOW_SUN_OFF - base), -LOW_SUN_TURN, LOW_SUN_TURN);
+    return base + turn * low;
+  }
+
+  /** Follows the sun with the Sun lens's view, eased, while the lens still has the angle. */
+  private chaseSun(dt: number): void {
+    if (this.mode !== 'doll' || this.lens !== 'sun' || !this.sunSteer) {
+      this.sunChase = false;
+      return;
+    }
+    // A framing move in progress finishes first.
+    if (this.flying || this.introRunning || !this.orbitLive || this.tweens.has('camera')) return;
+    const sph = new THREE.Spherical().setFromVector3(this.camera.position.clone().sub(this.controls.target));
+    const want = this.sunAzimuth(this.sunBase);
+    const gap = Math.atan2(Math.sin(want - sph.theta), Math.cos(want - sph.theta));
+    if (Math.abs(gap) < 0.002) {
+      this.sunChase = false;
+      return;
+    }
+    sph.theta += gap * (1 - Math.exp(-dt / SUN_FOLLOW));
+    this.camera.position.setFromSpherical(sph).add(this.controls.target);
+    this.camera.lookAt(this.controls.target);
+    this.dirty = true;
+  }
+
+  /**
    * Moves the camera to frame the current lens, easing the screen insets to
    * new values on the way when they are given. It keeps the user's angle,
-   * except that the sun lens swings round to see the day's arc side on.
+   * except that the sun lens swings round to see the day's arc side on, and,
+   * until the person turns the view, toward the sun's side as it drops.
    */
-  private reframe(pad = this.pad, padX = this.padX, dur = 0.9): void {
+  private reframe(pad = this.pad, padX = this.padX, dur = 0.9, top = this.padTop): void {
     const off = this.camera.position.clone().sub(this.controls.target);
     const sph = new THREE.Spherical().setFromVector3(off);
     const theta0 = sph.theta;
-    if (this.lens === 'sun') sph.theta = this.arcAzimuth(sph.theta);
+    if (this.lens === 'sun') {
+      sph.theta = this.arcAzimuth(sph.theta);
+      if (this.sunSteer) {
+        this.sunBase = sph.theta;
+        sph.theta = this.sunAzimuth(this.sunBase);
+      }
+    }
     const p0 = this.pad;
     const x0 = this.padX;
+    const top0 = this.padTop;
     this.pad = pad;
     this.padX = padX;
+    this.padTop = top;
     const f = this.lensFraming(sph.theta, sph.phi);
     this.pad = p0;
     this.padX = x0;
+    this.padTop = top0;
     this.controls.maxDistance = Math.max(this.controls.maxDistance, f.d * 1.25);
     const d0 = sph.radius;
     const t0 = this.controls.target.clone();
@@ -792,6 +938,7 @@ export class Viewer {
       .run('camera', dur, (k) => {
         this.pad = lerp(p0, pad, k);
         this.padX = lerp(x0, padX, k);
+        this.padTop = lerp(top0, top, k);
         this.applyView();
         this.target.lerpVectors(t0, f.target, k);
         this.setOrbit(lerp(theta0, sph.theta, k), sph.phi, lerp(d0, f.d, k));
@@ -855,6 +1002,11 @@ export class Viewer {
     }
     this.pathDots.geometry.setAttribute('position', new THREE.Float32BufferAttribute(dots, 3));
     this.hourDots.geometry.setAttribute('position', new THREE.Float32BufferAttribute(hours, 3));
+    // Another month's arc may lie a little differently; the Sun lens turns from where it now shows side on.
+    if (this.sunSteer) {
+      this.sunBase = this.arcAzimuth(this.sunBase);
+      this.sunChase = true;
+    }
     this.dirty = true;
   }
 
@@ -909,12 +1061,16 @@ export class Viewer {
 
     // Lights come on as the sun goes down, a little before it is dark.
     const lamps = (1 - smooth(0.2, 0.85, day)) * g;
+    this.lampsK = lamps;
+    this.inkGhost();
     this.u.uLamp.value.copy(col(0xffc98c)).multiplyScalar(LAMP * lamps);
     (this.built.lamps.material as THREE.MeshLambertMaterial).emissiveIntensity = 2.6 * lamps;
     // The bounce only depends on where the sun is, and the opening calls this every frame.
     if (dir.distanceToSquared(this.bounceDir) > 1e-8) {
       this.built.field.setSun(dir);
       this.bounceDir.copy(dir);
+      this.litDirty = true;
+      if (this.sunSteer) this.sunChase = true;
     }
     this.u.uBounce.value.copy(this.sunLight.color).multiplyScalar(this.sunLight.intensity / BOUNCE_SCALE);
     this.u.uDay.value = day;
@@ -929,18 +1085,29 @@ export class Viewer {
     t.uCast.value = 0.17 * smooth(2 * DEG, 24 * DEG, altitude) * g * this.tableGain;
     t.uContact.value = lerp(0.12, 0.26, day) * this.tableGain;
 
+    // The sky out of the windows is the page's for the hour. The far blocks fade toward the page
+    // behind the block on the stage, and toward the horizon seen from inside.
+    const stops = skyStops(day, gold);
+    const haze = stops[this.outsideK > 0 ? 0 : 1];
+    this.fogColour.setRGB(haze[0] / 255, haze[1] / 255, haze[2] / 255, THREE.SRGBColorSpace);
+    this.glowColour.copy(this.sunLight.color).multiplyScalar(up);
+    this.outdoors.setSky(stops, this.fogColour, dir, this.glowColour, smooth(-1 * DEG, 3 * DEG, altitude));
+
     // The site is a model under one low lamp: its shade deeper and cooler than a room's, its sunlit
     // faces held short of white so they keep the sun's colour, its windows lit with the flat's lamps,
-    // and the far blocks hazed toward the page so the chosen one stands forward.
+    // and the far blocks hazed so the chosen one stands forward.
     if (this.site) {
       const su = this.site.u;
       su.uContact.value = lerp(0.16, 0.3, day);
       su.uNight.value = lamps;
       su.uSunK.value = SITE_SUN;
-      su.uShade.value.setRGB(lerp(0.95, 0.52, day), lerp(0.95, 0.57, day), lerp(1, 0.7, day));
-      const body = skyStops(day, gold)[1];
-      const fog = this.fogColour.setRGB(body[0] / 255, body[1] / 255, body[2] / 255, THREE.SRGBColorSpace);
-      su.uFog.value.set(fog.r, fog.g, fog.b, 0.6);
+      // After dark the sky's light is so dim, and so blue, that the tone map's toe would crush white card to
+      // black and push what is left to a saturated blue. A moonlit lift, strongest in red where the night sky
+      // is weakest, keeps the blocks as dark blue-grey forms for their lit windows to sit in.
+      const dark = 1 - smooth(0, 0.45, day);
+      su.uShade.value.setRGB(lerp(0.95, 0.52, day) * (1 + 20 * dark), lerp(0.95, 0.57, day) * (1 + 15 * dark), lerp(1, 0.7, day) * (1 + 8 * dark));
+      this.siteHaze(this.site);
+      this.siteShadowDirty = true;
     }
 
     this.placeSunMarker();
@@ -1026,7 +1193,126 @@ export class Viewer {
     }
   }
 
-  async enterWalk(at?: { x: number; y: number }, lookAt?: { x: number; y: number }): Promise<void> {
+  /**
+   * How clear the view out of the windows is, 0 to 1. Above 0 the sky is
+   * drawn behind the glass and the site stands round the flat, whole, at its
+   * true height below; it arrives fully hazed and clears as k rises, so the
+   * view seems to come into focus rather than appear.
+   */
+  private setOutside(k: number): void {
+    const was = this.outsideK > 0;
+    this.outsideK = k;
+    const on = k > 0;
+    this.outdoors.setOpacity(k);
+    const site = this.site;
+    if (site && on !== was) this.viewFromInside(site, on);
+    // The haze colour changes between the stage's and the horizon's.
+    if (on !== was) this.applyLight();
+    else if (site) this.siteHaze(site);
+    this.setCompass(this.compassShow);
+    this.walkDepth();
+    this.dirty = true;
+  }
+
+  /**
+   * The site set up to be seen from inside the flat, or put away again as the
+   * dollhouse keeps it, hidden. From inside, the block stands whole and still,
+   * except where its walls would cross or cover the flat; it casts no shadow
+   * into the flat's map, which would close the windows, but has a map of its
+   * own; and its walls show both faces, so a window that looks back into the
+   * block sees the block, not through it.
+   */
+  private viewFromInside(site: SiteModel, on: boolean): void {
+    site.root.visible = on;
+    const u = site.u;
+    u.uSplit.value = 1e4;
+    u.uMove.value.set(0, 0, 0);
+    u.uGround.value = 1;
+    site.caps.visible = false;
+    site.lines.position.y = 0;
+    (site.faint.material as THREE.LineBasicMaterial).opacity = 0.22;
+    this.setGhost(0);
+    site.solid.castShadow = !on;
+    const mat = site.solid.material as THREE.Material;
+    mat.side = on ? THREE.DoubleSide : THREE.FrontSide;
+    mat.needsUpdate = true;
+    // From inside, the ground runs on to the horizon, solid, instead of fading into the page as the table does.
+    site.far.visible = on;
+    const ground = site.ground.material as THREE.MeshLambertMaterial;
+    ground.transparent = !on;
+    ground.depthWrite = on;
+    ground.color.set(on ? PLATE_INSIDE : PLATE);
+    const r = site.radius;
+    if (on) u.uRim.value.set(site.groundReach * 2, site.groundReach * 2 + 1);
+    else u.uRim.value.set(r * 0.32, r * 0.92);
+    const b = this.built.box;
+    if (on) {
+      u.uHideMin.value.set(b.min.x - HIDE_MARGIN, -0.3, b.min.z - HIDE_MARGIN);
+      u.uHideMax.value.set(b.max.x + HIDE_MARGIN, this.built.height + 0.45, b.max.z + HIDE_MARGIN);
+    } else {
+      u.uHideMin.value.set(1, 1, 1);
+      u.uHideMax.value.set(-1, -1, -1);
+      u.uSiteShadowOn.value = 0;
+    }
+    this.siteShadowDirty = this.shadowDirty = true;
+  }
+
+  /**
+   * The haze on the site. On the stage it grows with distance from the
+   * chosen block. From inside it grows with distance from the walker, is full
+   * while the view opens and lifts as it clears.
+   */
+  private siteHaze(site: SiteModel): void {
+    const u = site.u;
+    const c = this.fogColour;
+    const k = this.outsideK;
+    if (k <= 0) {
+      u.uFog.value.set(c.r, c.g, c.b, 0.6);
+      u.uFogAt.value.set(0, 0, 0);
+      u.uFogRange.value.set(...STAGE_HAZE);
+      return;
+    }
+    u.uFog.value.set(c.r, c.g, c.b, lerp(1, WALK_HAZE, k));
+    u.uFogRange.value.set(lerp(-1, WALK_HAZE_NEAR, k), lerp(0, WALK_HAZE_FAR, k));
+    u.uFogAt.value.copy(this.camera.position).applyMatrix4(this.siteInverse);
+  }
+
+  /** Walking, the far plane reaches the last block in view; with no site nothing outside the flat needs depth. */
+  private walkDepth(): void {
+    if (this.mode !== 'walk' || this.flying) return;
+    const site = this.outsideK > 0 ? this.site : null;
+    const far = site ? this.camera.position.distanceTo(this.sitePoint(0, 0, 0)) + site.groundReach * 1.42 + site.peak : 60;
+    if (this.camera.near === 0.06 && Math.abs(far - this.camera.far) < far * 0.02) return;
+    this.camera.near = 0.06;
+    this.camera.far = far;
+    this.camera.updateProjectionMatrix();
+  }
+
+  /** Before a frame with the view open: the haze follows the walker, and the site's shadow is drawn again if the sun or the site moved. */
+  private stepOutside(): void {
+    const site = this.site;
+    if (!site) return;
+    this.siteHaze(site);
+    const u = site.u;
+    const up = this.sun.altitude > -0.01;
+    u.uSiteShadowOn.value = up ? 1 : 0;
+    if (!up || !this.siteShadowDirty) return;
+    this.siteShadowDirty = false;
+    const pts: THREE.Vector3[] = [];
+    for (const x of [-site.radius, site.radius]) for (const y of [0, site.peak]) for (const z of [-site.radius, site.radius]) pts.push(this.sitePoint(x, z, y));
+    this.outdoors.fit(pts, this.sunDir(), WALK_SITE_SOFT);
+    this.outdoors.render(this.renderer, this.scene, site.solid);
+    u.uSiteShadow.value = this.outdoors.map.texture;
+    u.uSiteShadowMatrix.value.copy(this.outdoors.matrix);
+    u.uSiteShadowSoft.value.copy(this.outdoors.soft);
+  }
+
+  /**
+   * Walks in from the dollhouse: to `at` (plan mm, the front door when left
+   * out), facing `lookAt`. With `now`, there is no flight in and the view out
+   * is clear at once, as for reduced motion and screenshots.
+   */
+  async enterWalk(at?: { x: number; y: number }, lookAt?: { x: number; y: number }, opts: { now?: boolean } = {}): Promise<void> {
     if (this.mode !== 'doll') return;
     this.saved = { pos: this.camera.position.clone(), target: this.controls.target.clone() };
     this.controls.enabled = false;
@@ -1053,10 +1339,26 @@ export class Viewer {
     const q0 = this.camera.quaternion.clone();
     const f0 = this.camera.fov;
     const pad0 = this.pad;
+    const top0 = this.padTop;
     const p1 = new THREE.Vector3(spot.x, EYE, spot.z);
     const q1 = new THREE.Quaternion().setFromEuler(new THREE.Euler(this.walk.pitch, this.walk.yaw, 0, 'YXZ'));
     const f1 = this.walkFov();
     this.camera.near = 0.06;
+    if (opts.now) {
+      // Inside, every wall stands; with no flight there is no time for the cut ones to rise.
+      this.u.uCut.value.fill(0);
+      this.cutWant.fill(0);
+      this.fitHighlight();
+      this.camera.fov = f1;
+      this.pad = 0;
+      this.padTop = 0;
+      this.applyView();
+      this.setShell(1);
+      this.u.uInside.value = 1;
+      this.syncWalkCamera();
+      this.setOutside(1);
+      return;
+    }
     this.flying = true;
     await this.tweens.run(
       'camera',
@@ -1065,7 +1367,9 @@ export class Viewer {
         this.camera.position.lerpVectors(p0, p1, k);
         this.camera.quaternion.slerpQuaternions(q0, q1, smooth(0.1, 1, k));
         this.camera.fov = lerp(f0, f1, k);
+        // First person fills the screen: the interface floats over it.
         this.pad = lerp(pad0, 0, k);
+        this.padTop = lerp(top0, 0, k);
         this.applyView();
         this.setShell(smooth(0.62, 0.97, k));
         // Under the ceiling the sky reaches a room only through its windows.
@@ -1075,6 +1379,8 @@ export class Viewer {
     );
     this.flying = false;
     this.syncWalkCamera();
+    // Only now, under a closed ceiling, can the block stand round the flat without hiding it.
+    if (this.mode === 'walk') void this.tweens.run('outside', OUTSIDE_TIME, (k) => this.setOutside(k), { ease: ease.out });
   }
 
   async exitWalk(): Promise<void> {
@@ -1092,6 +1398,8 @@ export class Viewer {
     this.mode = 'doll';
     this.hooks.mode?.('doll');
     this.flying = true;
+    this.tweens.kill('outside');
+    const out0 = this.outsideK;
     await this.tweens.run(
       'camera',
       1.6,
@@ -1100,8 +1408,10 @@ export class Viewer {
         this.camera.quaternion.slerpQuaternions(q0, q1, smooth(0, 0.85, k));
         this.camera.fov = lerp(f0, DOLL_FOV, k);
         this.applyView();
-        this.setShell(1 - smooth(0.05, 0.4, k));
-        this.u.uInside.value = 1 - smooth(0.05, 0.5, k);
+        // The view out hazes over and the block steps away before the ceiling lifts off.
+        this.setOutside(out0 * (1 - smooth(0, 0.12, k)));
+        this.setShell(1 - smooth(0.1, 0.42, k));
+        this.u.uInside.value = 1 - smooth(0.1, 0.5, k);
       },
       { ease: ease.inOutQuart }
     );
@@ -1215,6 +1525,8 @@ export class Viewer {
     this.select(null);
     this.siteSpec = site;
     this.site = buildSite(site, this.coarse, () => (this.dirty = true));
+    this.site.u.uSiteShadow.value = this.outdoors.map.texture;
+    this.siteShadowDirty = true;
     this.scene.add(this.site.root);
     if (!same) {
       this.unit = null;
@@ -1402,6 +1714,8 @@ export class Viewer {
   private leaveWalkNow(): void {
     if (this.mode !== 'walk' || !this.saved) return;
     this.tweens.kill('camera');
+    this.tweens.kill('outside');
+    this.setOutside(0);
     this.walk.route = null;
     this.walk.keys.clear();
     this.flying = false;
@@ -1484,12 +1798,13 @@ export class Viewer {
       this.camera.lookAt(this.target);
     }
     this.siteMatrix.copy(m);
+    this.siteInverse.copy(m).invert();
     if (site) {
       site.root.position.copy(p.offset);
       site.root.rotation.set(0, p.yaw, 0);
       site.root.updateMatrixWorld(true);
     }
-    this.shadowDirty = this.dirty = true;
+    this.siteShadowDirty = this.shadowDirty = this.dirty = true;
   }
 
   /** The unit the flat goes to when none was chosen: the marked storey, on the side its windows face now. */
@@ -1570,10 +1885,19 @@ export class Viewer {
     through.renderOrder = 8;
     outline.renderOrder = 9;
     g.add(patch, through, outline);
-    g.userData.base = [0.78, 0.16, 0.9];
+    // The patch nearly solid, so the flat reads as the strongest mark on its peach-tinted storey.
+    g.userData.base = [0.92, 0.16, 0.9];
     this.ghost = g;
     this.scene.add(g);
+    this.inkGhost();
     this.setGhost(this.mode === 'block' && !this.pushing ? 1 : 0);
+  }
+
+  /** The unit's outline: graphite on the card by day, so it does not vanish into the orange; lamplight on the dark block at night. */
+  private inkGhost(): void {
+    const line = this.ghost?.children[2] as THREE.LineSegments | undefined;
+    if (!line) return;
+    (line.material as THREE.LineBasicMaterial).color.copy(col(PAL.capSolid)).lerp(col(0xfff0dc), this.lampsK);
   }
 
   private setGhost(k: number): void {
@@ -1595,7 +1919,7 @@ export class Viewer {
     const d = this.sunDir();
     const sun = Math.atan2(d.x, d.z);
     const phi = this.portrait ? 1.08 : 1.04;
-    return { theta: this.clearView([sun + 1.15, sun - 1.15], phi, Math.PI, []), phi };
+    return { theta: this.clearView([sun + 1.15, sun - 1.15], phi, Math.PI, [], true), phi };
   }
 
   /** The azimuth that shows the flat's side three-quarter on and within about 75° of square, past the neighbours if it can. */
@@ -1611,9 +1935,11 @@ export class Viewer {
   /**
    * The camera azimuth, within `spread` of the ideal ones, from which the
    * neighbours hide least of the block, and of the `focus` points (site frame)
-   * most of all; nearer an ideal wins a tie.
+   * most of all; nearer an ideal wins a tie. With `number`, it also wants a
+   * painted block number in view, unhidden and no more than about 40° off
+   * square, so the block can be read by its number on arrival.
    */
-  private clearView(ideal: number[], phi: number, spread: number, focus: THREE.Vector3[]): number {
+  private clearView(ideal: number[], phi: number, spread: number, focus: THREE.Vector3[], number = false): number {
     const site = this.site!;
     const b = site.box;
     const cx = (b.min.x + b.max.x) / 2;
@@ -1638,7 +1964,15 @@ export class Viewer {
       const f = this.blockFraming(theta, phi);
       const eye = new THREE.Vector3().setFromSphericalCoords(f.d, phi, theta).add(f.target).applyMatrix4(toSite);
       const blocked = pts.filter((p) => site.hidden(eye, p)).length / pts.length + focus.filter((p) => site.hidden(eye, p)).length / Math.max(1, focus.length);
-      const score = blocked + 0.5 * (turn / (Math.PI / 2)) ** 2;
+      let score = blocked + 0.5 * (turn / (Math.PI / 2)) ** 2;
+      if (number && site.numbers.length) {
+        let seen = 0;
+        for (const n of site.numbers) {
+          const facing = n.normal.dot(eye.clone().sub(n.at).normalize());
+          if (!site.hidden(eye, n.at)) seen = Math.max(seen, clamp((facing - 0.35) / 0.4, 0, 1));
+        }
+        score += NUMBER_SEEN * (1 - seen) ** 2;
+      }
       if (score < best.score) best = { theta, score };
     }
     return best.theta;
@@ -1666,21 +2000,25 @@ export class Viewer {
   }
 
   /** The block framed afresh for new insets, at the angle the person left it, easing there. */
-  private reframeBlock(pad: number, padX: number): void {
+  private reframeBlock(pad: number, padX: number, top = this.padTop): void {
     const sph = new THREE.Spherical().setFromVector3(this.camera.position.clone().sub(this.controls.target));
     const p0 = this.pad;
     const x0 = this.padX;
+    const top0 = this.padTop;
     this.pad = pad;
     this.padX = padX;
+    this.padTop = top;
     const f = this.blockFraming(sph.theta, sph.phi);
     this.pad = p0;
     this.padX = x0;
+    this.padTop = top0;
     const t0 = this.controls.target.clone();
     this.orbitLive = false;
     void this.tweens
       .run('camera', 0.5, (k) => {
         this.pad = lerp(p0, pad, k);
         this.padX = lerp(x0, padX, k);
+        this.padTop = lerp(top0, top, k);
         this.applyView();
         this.target.lerpVectors(t0, f.target, k);
         this.setOrbit(sph.theta, sph.phi, lerp(sph.radius, f.d, k));
@@ -1945,6 +2283,15 @@ export class Viewer {
     this.ray.setFromCamera(new THREE.Vector2(((clientX - r.left) / r.width) * 2 - 1, -((clientY - r.top) / r.height) * 2 + 1), this.camera);
   }
 
+  /** Which faces of the walls have the sun on them now, worked out again only after the sun has moved. */
+  private litNow(): Uint8Array {
+    if (this.litDirty || this.lit.length !== this.current.walls.length * 2) {
+      this.lit = litFaces(this.current, this.sunDir());
+      this.litDirty = false;
+    }
+    return this.lit;
+  }
+
   /** How tall a wall is drawn right now, metres, with any cut applied. */
   private wallTop = (i: number): number => cutTop(this.u.uCut.value[i], this.u.uCutSpan.value);
 
@@ -2083,18 +2430,19 @@ export class Viewer {
    * a wall's verdict) the model is left too big for the space above it. This
    * re-fits for the new insets at the angle the user chose, resetting zoom and
    * pan as a lens change does. Outside the dollhouse it is plain setInsets.
+   * `top` is the header's height, as for setInsets; leaving it out means none.
    */
-  fitInsets(bottom: number, left = 0): void {
+  fitInsets(bottom: number, left = 0, top = 0): void {
     if (this.mode === 'block' && !this.flying && this.site) {
-      this.reframeBlock(bottom, left);
+      this.reframeBlock(bottom, left, top);
       return;
     }
     if (this.mode !== 'doll' || this.introRunning || this.flying) {
-      this.setInsets(bottom, left);
+      this.setInsets(bottom, left, top);
       return;
     }
     // reframe fits against the new insets and eases the insets there alongside the camera.
-    this.reframe(bottom, left, 0.5);
+    this.reframe(bottom, left, 0.5, top);
   }
 
   // ── Cutting walls away ────────────────────────────────────────────────────
@@ -2123,6 +2471,7 @@ export class Viewer {
     }
     const active = !!orbit || this.mode === 'doll';
     const cut = this.u.uCut.value;
+    const lit = this.lens === 'sun' ? this.litNow() : null;
     let moved = false;
     this.built.cuts.forEach((w, i) => {
       const on = this.cutWant[i] > 0.5;
@@ -2133,6 +2482,9 @@ export class Viewer {
         // Thresholds differ by state, so a wall seen at 45° does not flutter.
         if (w.out !== 0) want = w.out * facing > (on ? 0.1 : 0.22) ? 1 : 0;
         else want = Math.abs(facing) > (on ? 0.68 : 0.74) ? 1 : 0;
+        // In the Sun lens an inside wall stands when the face it turns to the camera has the sun on it:
+        // with the sun low, that is where all of its light lands.
+        if (want && lit && w.out === 0 && lit[i * 2 + (facing > 0 ? 0 : 1)]) want = 0;
       }
       this.cutWant[i] = want;
       const now = cut[i];
@@ -2156,6 +2508,7 @@ export class Viewer {
       this.dirty = true;
       this.shadowDirty = true;
     }
+    if (this.sunChase) this.chaseSun(dt);
     if (this.mode === 'walk' && !this.flying) this.stepWalk(dt);
     else if (this.orbitLive && !this.pushing) this.controls.update();
     // During the push-in the walls hold the cut made for where it arrives.
@@ -2164,6 +2517,7 @@ export class Viewer {
     // A walk flight needs a near plane small enough for the room once it gets there.
     if (this.mode !== 'walk' || this.flying) this.fitDepth(this.flying ? 0.06 : 0.5);
     this.dirty = false;
+    if (this.outsideK > 0) this.stepOutside();
     if (this.shadowDirty) {
       this.renderer.shadowMap.needsUpdate = true;
       this.shadowDirty = false;
@@ -2187,6 +2541,7 @@ export class Viewer {
     this.dropSite();
     this.setUnit(null);
     this.built.dispose();
+    this.outdoors.dispose();
     this.renderer.dispose();
   }
 }

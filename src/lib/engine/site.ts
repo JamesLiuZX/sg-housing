@@ -31,7 +31,17 @@ const CARD = 0xfff8ec;
 /** The neighbours' card: cooler and greyer, so they step back. */
 const CONTEXT = 0xe2e4e5;
 /** The site plate, a shade under the page so a sunlit patch of it still reads as ground. */
-const PLATE = 0xefece6;
+export const PLATE = 0xefece6;
+/**
+ * The same ground seen from inside a flat: greyboard, darker than the page,
+ * because there it lies against the sky at the horizon and has to read as
+ * ground under white card blocks rather than as more paper.
+ */
+export const PLATE_INSIDE = 0xcdc6b9;
+/** On the stage, haze starts and is full this many metres from the chosen block. */
+export const STAGE_HAZE: readonly [number, number] = [60, 260];
+/** The ground seen from inside runs at least this far, metres: past where the haze seen from inside is complete. */
+const FAR_GROUND = 4500;
 
 /** What the block stage is asked to show. */
 export interface BlockSite {
@@ -91,9 +101,28 @@ export interface SiteUniforms {
   uFog: THREE.IUniform<THREE.Vector4>;
   uFogAt: THREE.IUniform<THREE.Vector3>;
   uFogRange: THREE.IUniform<THREE.Vector2>;
+  /** The table fades out between these distances from the block's centroid, metres. */
+  uRim: THREE.IUniform<THREE.Vector2>;
   /** A box in the world inside which the chosen block is not drawn: round the flat, seen from inside it. Empty while min > max. */
   uHideMin: THREE.IUniform<THREE.Vector3>;
   uHideMax: THREE.IUniform<THREE.Vector3>;
+  /**
+   * The site's own sun shadow, for when the shared shadow map is fitted to the
+   * flat alone (walking, with the site seen through the windows): packed
+   * depth, world to map, on (1) or off (0), and the filter's step in map units
+   * (x, y) with the lift off each surface in metres (z).
+   */
+  uSiteShadow: THREE.IUniform<THREE.Texture | null>;
+  uSiteShadowMatrix: THREE.IUniform<THREE.Matrix4>;
+  uSiteShadowOn: THREE.IUniform<number>;
+  uSiteShadowSoft: THREE.IUniform<THREE.Vector3>;
+}
+
+/** Where the block's number is painted: the middle of the lettering and the wall's outward normal, site frame; a figure's height, metres. */
+export interface PaintedNumber {
+  at: THREE.Vector3;
+  normal: THREE.Vector3;
+  height: number;
 }
 
 export interface BlockHit {
@@ -114,6 +143,12 @@ export interface SiteModel {
   lines: THREE.LineSegments;
   /** The neighbours' rooflines. */
   faint: THREE.LineSegments;
+  /** The table under the site. */
+  ground: THREE.Mesh;
+  /** The ground beyond the table, out to where the haze is complete: shown only from inside a flat, where the horizon is in view. */
+  far: THREE.Mesh;
+  /** How far that ground runs from the block's centroid, metres, square. */
+  groundReach: number;
   u: SiteUniforms;
   storeys: number;
   /** Roof slab of the chosen block, metres. */
@@ -125,6 +160,8 @@ export interface SiteModel {
   /** Tallest neighbour roof, metres. */
   neighbourTop: number;
   facades: Facade[];
+  /** Where the block's number is painted, one per end wall that took it. */
+  numbers: PaintedNumber[];
   /** The chosen block's footprint box in the site frame. */
   box: THREE.Box3;
   /** The first place a site-frame ray meets the chosen block. */
@@ -161,6 +198,10 @@ vLow = transformed.y;
 vBlkWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;
 `;
 
+/** The world normal, for the site's own shadow lookup. Lit materials only: a depth shader has no normal. */
+const VERT_NORMAL_HEAD = 'varying vec3 vBlkNormalW;\n';
+const VERT_NORMAL = 'vBlkNormalW = normalize(mat3(modelMatrix) * objectNormal);\n';
+
 /** What every surface of the site reads: its exposure, the haze, the hole round a flat seen from inside. */
 const FRAG_SHARED = /* glsl */ `
 uniform vec3 uShade;
@@ -170,8 +211,13 @@ uniform vec3 uFogAt;
 uniform vec2 uFogRange;
 uniform vec3 uHideMin;
 uniform vec3 uHideMax;
+uniform sampler2D uSiteShadow;
+uniform mat4 uSiteShadowMatrix;
+uniform float uSiteShadowOn;
+uniform vec3 uSiteShadowSoft;
 varying vec3 vSite;
 varying vec3 vBlkWorld;
+varying vec3 vBlkNormalW;
 // Light kept off the neighbours' sunlit faces and given to their shade, so they read flatter than the chosen block.
 float blkDirect = 1.0;
 float blkSky = 1.0;
@@ -259,11 +305,14 @@ if (blkKind < 0.5 || blkKind > 3.5) {
   float r = blkHash(vec2(st + blkSeed * 37.0, floor(u / bay) + blkSeed * 91.0));
   float lit = step(blkMain ? 0.45 : 0.6, r) * (0.55 + 0.45 * fract(r * 13.7));
   float wn = st > 1.5 && len > 1.6 && !blank ? wx * wy : 0.0;
-  totalEmissiveRadiance += uGlow * uNight * ((blkMain ? 1.0 : 0.32) * wn * lit + 0.4 * deck);
+  // A lit window also spills a little warmth onto the wall round it, so at night it reads as glow, not as a hole.
+  float spill = st > 1.5 && len > 1.6 && !blank ? 0.16 : 0.0;
+  totalEmissiveRadiance += uGlow * uNight * ((blkMain ? 1.0 : 0.85) * (wn + spill) * lit + 0.4 * deck);
   if (blkMain) {
     float inBand = smoothstep(uBand.x - blkPx, uBand.x, blkY) * (1.0 - smoothstep(uBand.y, uBand.y + blkPx, blkY));
     float rim = 1.0 - smoothstep(0.6 * blkPx, 1.7 * blkPx, min(abs(blkY - uBand.x), abs(blkY - uBand.y)));
-    blkC = mix(blkC, uMark * (1.0 - 0.22 * win), 0.78 * uBandOn * inBand);
+    // The storey is tinted a light peach, so the flat's own patch, in the sun's full orange, stands out of it.
+    blkC = mix(blkC, mix(uMark, vec3(1.0), 0.34) * (1.0 - 0.18 * win), 0.74 * uBandOn * inBand);
     blkC = mix(blkC, uMark * 0.35, 0.9 * uBandOn * rim);
     totalEmissiveRadiance += uMark * uBandOn * inBand * (0.14 + 0.45 * uNight);
   }
@@ -278,28 +327,82 @@ if (blkKind < 0.5 || blkKind > 3.5) {
 diffuseColor.rgb = blkC;
 `;
 
-/** Haze, after tone mapping so it lands on the page's own colour. */
+/**
+ * Haze, after tone mapping so it lands on the page's own colour. It reaches
+ * its set strength over its range, then closes in completely over six times
+ * that distance, so ground that runs on to the horizon meets the sky there.
+ */
 const FRAG_FOG = /* glsl */ `
-gl_FragColor.rgb = mix(gl_FragColor.rgb, uFog.rgb, uFog.a * smoothstep(uFogRange.x, uFogRange.y, distance(vSite.xz, uFogAt.xz)));
+float blkFogD = distance(vSite.xz, uFogAt.xz);
+float blkFogK = uFog.a * smoothstep(uFogRange.x, uFogRange.y, blkFogD);
+blkFogK += (1.0 - blkFogK) * smoothstep(uFogRange.y, uFogRange.y * 6.0, blkFogD);
+gl_FragColor.rgb = mix(gl_FragColor.rgb, uFog.rgb, blkFogK);
 `;
+
+/**
+ * The site's own sun shadow, read the way the soft filter reads the shared
+ * map: sixteen taps a filter step apart, blended bilinearly, so the edge of a
+ * block's shadow is a smooth ramp about as wide as the step. Each surface is
+ * lifted off its own depth along its normal, turned for a face seen from
+ * behind. Outside the map, and while it is off, everything is in sun.
+ */
+const SITE_SHADOW = /* glsl */ `
+float blkSiteShadow() {
+  if (uSiteShadowOn < 0.5) return 1.0;
+  vec3 blkN = normalize(vBlkNormalW) * (gl_FrontFacing ? 1.0 : -1.0);
+  vec4 blkSc = uSiteShadowMatrix * vec4(vBlkWorld + blkN * uSiteShadowSoft.z, 1.0);
+  if (blkSc.x <= 0.0 || blkSc.x >= 1.0 || blkSc.y <= 0.0 || blkSc.y >= 1.0 || blkSc.z >= 1.0) return 1.0;
+  vec2 blkStep = uSiteShadowSoft.xy;
+  vec2 blkF = fract(blkSc.xy / blkStep + 0.5);
+  vec2 blkUv = blkSc.xy - blkF * blkStep;
+  #define BLK_STAP( x, y ) step( blkSc.z, unpackRGBAToDepth( texture2D( uSiteShadow, blkUv + vec2( x, y ) * blkStep ) ) )
+  #define BLK_SROW( y ) ( mix( BLK_STAP( -1.0, y ), BLK_STAP( 2.0, y ), blkF.x ) + BLK_STAP( 0.0, y ) + BLK_STAP( 1.0, y ) )
+  float blkS = ( mix( BLK_SROW( -1.0 ), BLK_SROW( 2.0 ), blkF.y ) + BLK_SROW( 0.0 ) + BLK_SROW( 1.0 ) ) * ( 1.0 / 9.0 );
+  #undef BLK_SROW
+  #undef BLK_STAP
+  return blkS;
+}
+`;
+
+/** Where three's light loop applies the shadow of a directional light. Only the sun casts one. */
+const SUN_TERM = 'getShadow( directionalShadowMap[ i ]';
+let sunLoop: string | null = null;
+
+/**
+ * three's light loop with the site's own shadow laid on the sun alone, so the
+ * fill light still reaches a block in a neighbour's shadow. Empty if three
+ * has changed its loop; the shadow then falls on all direct light.
+ */
+function sunShadowLoop(): string {
+  if (sunLoop !== null) return sunLoop;
+  const src = THREE.ShaderChunk.lights_fragment_begin;
+  sunLoop = src.includes(SUN_TERM) ? src.replace(SUN_TERM, 'blkSiteShadow() * ' + SUN_TERM) : '';
+  return sunLoop;
+}
 
 /** The site's lighting and haze, on any Lambert shader. */
 function siteLight(fs: string): string {
+  const loop = sunShadowLoop();
   return fs
-    .replace('#include <shadowmap_pars_fragment>', softShadowChunk())
+    .replace('#include <shadowmap_pars_fragment>', softShadowChunk() + SITE_SHADOW)
+    .replace('#include <lights_fragment_begin>', loop || '#include <lights_fragment_begin>')
     .replace('#include <lights_fragment_maps>', '#include <lights_fragment_maps>\nirradiance *= uShade * blkSky;')
-    .replace('#include <lights_fragment_end>', '#include <lights_fragment_end>\nreflectedLight.directDiffuse *= uSunK * blkDirect;')
+    .replace('#include <lights_fragment_end>', `#include <lights_fragment_end>\nreflectedLight.directDiffuse *= uSunK * blkDirect${loop ? '' : ' * blkSiteShadow()'};`)
     .replace('#include <tonemapping_fragment>', '#include <tonemapping_fragment>\n' + FRAG_FOG);
 }
 
-function siteShade<T extends THREE.Material>(mat: T, u: SiteUniforms, extra: Record<string, THREE.IUniform>, key: string, pattern: boolean): T {
+/** The painted number: graphite by day; after dark it glows softly, or the dark block would lose it. */
+const FRAG_SIGN = /* glsl */ `
+${FRAG_CLIP}
+totalEmissiveRadiance += uGlow * uNight * 1.1 * diffuseColor.a;
+`;
+
+/** The site's shading on a Lambert material, with `frag` run once its colour is known. */
+function siteShade<T extends THREE.Material>(mat: T, u: SiteUniforms, extra: Record<string, THREE.IUniform>, key: string, frag: string): T {
   mat.onBeforeCompile = (s) => {
     Object.assign(s.uniforms, u, extra);
-    s.vertexShader = VERT_HEAD + s.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\n' + VERT_BODY);
-    s.fragmentShader = siteLight(FRAG_HEAD + s.fragmentShader).replace(
-      '#include <color_fragment>',
-      '#include <color_fragment>\n' + (pattern ? FRAG_COLOR : FRAG_CLIP)
-    );
+    s.vertexShader = VERT_HEAD + VERT_NORMAL_HEAD + s.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\n' + VERT_BODY + VERT_NORMAL);
+    s.fragmentShader = siteLight(FRAG_HEAD + s.fragmentShader).replace('#include <color_fragment>', '#include <color_fragment>\n' + frag);
   };
   mat.customProgramCacheKey = () => key;
   return mat;
@@ -325,17 +428,19 @@ function siteDepth(u: SiteUniforms): THREE.MeshDepthMaterial {
  * before its edge, the way a model's base dissolves into a photographer's
  * sweep.
  */
-function groundMaterial(u: SiteUniforms, ao: THREE.Texture, rect: THREE.Vector4, radius: number): THREE.MeshLambertMaterial {
+function groundMaterial(u: SiteUniforms, ao: THREE.Texture, rect: THREE.Vector4): THREE.MeshLambertMaterial {
   const mat = new THREE.MeshLambertMaterial({ color: PLATE, transparent: true, depthWrite: false });
   mat.onBeforeCompile = (s) => {
     Object.assign(s.uniforms, u, {
       uAo: { value: ao },
-      uAoRect: { value: rect },
-      uRim: { value: new THREE.Vector2(radius * 0.32, radius * 0.92) }
+      uAoRect: { value: rect }
     });
     s.vertexShader =
-      'varying vec3 vSite;\nvarying vec3 vBlkWorld;\n' +
-      s.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\nvSite = transformed;\nvBlkWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;');
+      'varying vec3 vSite;\nvarying vec3 vBlkWorld;\nvarying vec3 vBlkNormalW;\n' +
+      s.vertexShader.replace(
+        '#include <begin_vertex>',
+        '#include <begin_vertex>\nvSite = transformed;\nvBlkWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;\nvBlkNormalW = vec3(0.0, 1.0, 0.0);'
+      );
     s.fragmentShader = siteLight(
       FRAG_SHARED +
         'uniform sampler2D uAo;\nuniform vec4 uAoRect;\nuniform vec2 uRim;\nuniform float uContact;\nuniform float uGround;\n' +
@@ -537,21 +642,26 @@ let measure: CanvasRenderingContext2D | null = null;
 
 /**
  * The height of a figure, metres, for the number set on a wall `len` metres
- * wide on a block whose roof is at `top`: across the wall, or stacked.
+ * wide on a block whose roof is at `top`: across the wall, or stacked. The
+ * arrival view frames the whole block, so a figure has to grow with the
+ * block's larger dimension, `frame`, to stay readable there: about a
+ * twenty-first of it, kept between a storey and under three, the way the
+ * painters size them, and within what the wall and the block's height allow.
  */
-function figureHeight(label: string, len: number, top: number, vertical: boolean): number {
+function figureHeight(label: string, len: number, top: number, frame: number, vertical: boolean): number {
   const n = [...label].length;
-  if (vertical) return Math.min(len * 1.02, 3.6, (top * 0.42) / (n * 1.4));
+  const want = clamp(frame * 0.048, 2.4, 7.5);
+  if (vertical) return Math.min(len * 1.02, want * 1.25, (top * 0.5) / (n * 1.4));
   measure ??= document.createElement('canvas').getContext('2d')!;
   measure.font = `700 ${FIG}px "Barlow Condensed", "Arial Narrow", sans-serif`;
   // The number's width in figure heights.
   const across = Math.max(0.5, measure.measureText(label).width / FIG_CAP);
-  return Math.min((len * 0.8) / across, 4.2, top * 0.08);
+  return Math.min((len * 0.8) / across, want, top * 0.2);
 }
 
 /** A broad end wall takes the number across it; a narrow one, one figure under another, where each can stand far taller. */
-function numberStacks(label: string, len: number, top: number): boolean {
-  return [...label].length > 1 && figureHeight(label, len, top, true) > 1.35 * figureHeight(label, len, top, false);
+function numberStacks(label: string, len: number, top: number, frame: number): boolean {
+  return [...label].length > 1 && figureHeight(label, len, top, frame, true) > 1.35 * figureHeight(label, len, top, frame, false);
 }
 
 /**
@@ -677,9 +787,14 @@ export function buildSite(spec: BlockSite, coarse: boolean, onRepaint: () => voi
     uSunK: { value: 1 },
     uFog: { value: new THREE.Vector4() },
     uFogAt: { value: new THREE.Vector3() },
-    uFogRange: { value: new THREE.Vector2(60, 260) },
+    uFogRange: { value: new THREE.Vector2(...STAGE_HAZE) },
+    uRim: { value: new THREE.Vector2() },
     uHideMin: { value: new THREE.Vector3(1, 1, 1) },
-    uHideMax: { value: new THREE.Vector3(-1, -1, -1) }
+    uHideMax: { value: new THREE.Vector3(-1, -1, -1) },
+    uSiteShadow: { value: null },
+    uSiteShadowMatrix: { value: new THREE.Matrix4() },
+    uSiteShadowOn: { value: 0 },
+    uSiteShadowSoft: { value: new THREE.Vector3(1e-3, 1e-3, 0.3) }
   };
   const cards = { uCard: { value: col(CARD).clone() }, uContext: { value: col(CONTEXT).clone() }, uRoof: { value: top } };
 
@@ -760,7 +875,7 @@ export function buildSite(spec: BlockSite, coarse: boolean, onRepaint: () => voi
     for (const p of nb.footprint.parts) solid.cap(triangulate(p), h, true, -1);
   }
 
-  const solidMat = siteShade(new THREE.MeshLambertMaterial({ color: col(PAL.wall) }), u, cards, 'blk-site', true);
+  const solidMat = siteShade(new THREE.MeshLambertMaterial({ color: col(PAL.wall) }), u, cards, 'blk-site', FRAG_COLOR);
   const solidMesh = new THREE.Mesh(solid.build(), solidMat);
   solidMesh.castShadow = true;
   solidMesh.receiveShadow = true;
@@ -791,16 +906,19 @@ export function buildSite(spec: BlockSite, coarse: boolean, onRepaint: () => voi
 
   // ── The block number, near the top of each end wall. One way of setting it for both walls, so one texture serves.
   const label = spec.label.trim() || block.blk;
-  const vertical = painted.length > 0 && numberStacks(label, Math.min(...painted.map((w) => w.len)), top);
+  const spread = block.footprint.bounds;
+  const frame = Math.max(top + PARAPET, spread.maxX - spread.minX, spread.maxY - spread.minY);
+  const vertical = painted.length > 0 && numberStacks(label, Math.min(...painted.map((w) => w.len)), top, frame);
   const paint = paintNumber(label, vertical);
   const numTex = new THREE.CanvasTexture(paint.canvas);
   numTex.colorSpace = THREE.SRGBColorSpace;
   numTex.anisotropy = 8;
   const decal = new Solid();
   const uv: number[] = [];
+  const numbers: PaintedNumber[] = [];
   for (const w of painted) {
     // Metres to a canvas pixel, from the height a figure stands.
-    const k = figureHeight(label, w.len, top, vertical) / FIG_CAP;
+    const k = figureHeight(label, w.len, top, frame, vertical) / FIG_CAP;
     const cw = paint.cellW * k;
     const ch = paint.cellH * k;
     const dx = (w.b[0] - w.a[0]) / w.len;
@@ -819,6 +937,7 @@ export function buildSite(spec: BlockSite, coarse: boolean, onRepaint: () => voi
       decal.quad(at(-cw / 2, lo), at(cw / 2, lo), at(cw / 2, hi), at(-cw / 2, hi), n, storeyAt((lo + hi) / 2, S), 0, 0, 0, 1);
       uv.push(u0, v0, u1, v0, u1, v1, u0, v1);
     });
+    numbers.push({ at: at(0, y1 - (ch * paint.cells.length) / 2), normal: n.clone(), height: k * FIG_CAP });
   }
   const decalGeo = decal.build();
   decalGeo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
@@ -827,7 +946,7 @@ export function buildSite(spec: BlockSite, coarse: boolean, onRepaint: () => voi
     u,
     cards,
     'blk-site-paint',
-    false
+    FRAG_SIGN
   );
   const decals = new THREE.Mesh(decalGeo, decalMat);
   decals.receiveShadow = true;
@@ -846,16 +965,35 @@ export function buildSite(spec: BlockSite, coarse: boolean, onRepaint: () => voi
   let reach = 0;
   for (const o of outlines) for (const p of o) for (const [x, y] of p.outer) reach = Math.max(reach, Math.hypot(x, y));
   const radius = Math.max(120, reach + 45);
+  u.uRim.value.set(radius * 0.32, radius * 0.92);
   const contact = bakeContact(outlines, radius, coarse);
   const gPos = [-radius, 0, -radius, radius, 0, -radius, radius, 0, radius, -radius, 0, radius];
   const gGeo = new THREE.BufferGeometry();
   gGeo.setAttribute('position', new THREE.Float32BufferAttribute(gPos, 3));
   gGeo.setAttribute('normal', new THREE.Float32BufferAttribute([0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0], 3));
   gGeo.setIndex([0, 2, 1, 0, 3, 2]);
-  const ground = new THREE.Mesh(gGeo, groundMaterial(u, contact.tex, contact.rect, radius));
+  const ground = new THREE.Mesh(gGeo, groundMaterial(u, contact.tex, contact.rect));
   ground.receiveShadow = true;
   ground.renderOrder = -1;
   root.add(ground);
+  // The same ground on beyond the table, square ring by square ring, in the table's own material so the two meet without a seam.
+  const reachFar = Math.max(radius * 14, FAR_GROUND);
+  const fPos: number[] = [];
+  for (const r of [radius, reachFar]) fPos.push(-r, 0, -r, r, 0, -r, r, 0, r, -r, 0, r);
+  const fIdx: number[] = [];
+  for (let k = 0; k < 4; k++) {
+    const k1 = (k + 1) % 4;
+    fIdx.push(k, k1, 4 + k1, k, 4 + k1, 4 + k);
+  }
+  const fGeo = new THREE.BufferGeometry();
+  fGeo.setAttribute('position', new THREE.Float32BufferAttribute(fPos, 3));
+  fGeo.setAttribute('normal', new THREE.Float32BufferAttribute(Array.from({ length: 8 }, () => [0, 1, 0]).flat(), 3));
+  fGeo.setIndex(fIdx);
+  const far = new THREE.Mesh(fGeo, ground.material);
+  far.receiveShadow = true;
+  far.renderOrder = -1;
+  far.visible = false;
+  root.add(far);
 
   // ── Picking, analytically against the footprint: cheaper and steadier than the meshes.
   const walls: { p: XY; q: XY; len: number }[] = [];
@@ -951,6 +1089,9 @@ export function buildSite(spec: BlockSite, coarse: boolean, onRepaint: () => voi
     caps: capMesh,
     lines,
     faint,
+    ground,
+    far,
+    groundReach: reachFar,
     u,
     storeys: S,
     top,
@@ -958,6 +1099,7 @@ export function buildSite(spec: BlockSite, coarse: boolean, onRepaint: () => voi
     radius,
     neighbourTop,
     facades: list,
+    numbers,
     box,
     hit,
     hidden,

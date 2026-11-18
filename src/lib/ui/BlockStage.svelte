@@ -3,16 +3,23 @@
   import FlatChooser from './FlatChooser.svelte';
   import { facingWords, factsLine, roadName, storeyTag } from './place';
   import type { Session } from './session.svelte';
+  import StoreyReadout from './StoreyReadout.svelte';
   import StoreyScrubber from './StoreyScrubber.svelte';
   import SunPill from './SunPill.svelte';
 
   /**
    * The block stage: the real block stands in the middle, and round it only
    * what it takes to find a flat in it. Who the block is, top left. Its
-   * height, as a scale at the right edge under the thumb. The side the
-   * living room faces, tapped on the block (or on its outline, top right).
-   * The flat type and the way in at the bottom, with the sun, which arrives
-   * low in the west so the shadows say where it will fall.
+   * height, as a scale at the right edge under the thumb, with the storey and
+   * its resales at the scale's foot. The side the living room faces, tapped
+   * on the block (or on its outline, top right). The flat type and the way in
+   * at the bottom, with the sun, which arrives low in the west so the shadows
+   * say where it will fall.
+   *
+   * Nothing worth reading is read through the block. The words sit in bands
+   * at the top and bottom (on a wide screen, the left and bottom), their
+   * sizes are reported, and the engine frames the block in what is left.
+   * Only the scale's rail stands beside the block, at the edge.
    */
   let {
     session,
@@ -20,14 +27,19 @@
     leaving,
     bottom = $bindable(0),
     left = $bindable(0),
+    top = $bindable(0),
     onenter,
     onback
   }: {
     session: Session;
     wide: boolean;
     leaving: boolean;
+    /** Height of the controls along the bottom, px. */
     bottom?: number;
+    /** On a wide screen, where the words on the left end, px. */
     left?: number;
+    /** On a phone, height of the band of words at the top, px. */
+    top?: number;
     onenter: () => void;
     onback: () => void;
   } = $props();
@@ -37,7 +49,6 @@
   const source = $derived(session.facts?.source ?? null);
   const faces = $derived(session.facade ? facingWords(session.facade.bearing) : null);
 
-  let head = $state(0);
   let panel = $state<HTMLElement>();
   let panelW = $state(0);
   $effect(() => {
@@ -101,16 +112,22 @@
       <p class="disclose">Computer-generated model, not a photograph</p>
     </section>
     <div class="map" data-avoid><BlockOutline {session} /></div>
-    <div class="scale" data-avoid><StoreyScrubber {session} /></div>
-    <div class="sun" bind:clientHeight={bottom} style:left="{left + 24}px" data-avoid><SunPill {session} /></div>
+    <div class="scale" style:bottom="{bottom + 12}px" data-avoid><StoreyScrubber {session} /></div>
+    <div class="base" bind:clientHeight={bottom} style:left="{left + 24}px" data-avoid>
+      <div class="sun"><SunPill {session} /></div>
+      <StoreyReadout {session} />
+    </div>
   {:else}
-    <header class="top" bind:clientHeight={head} data-avoid>
-      {@render who(false)}
-      <p class="disclose">Computer-generated model, not a photograph</p>
-    </header>
-    <div class="map" data-avoid><BlockOutline {session} /></div>
-    <div class="scale" style:top="{head + 20}px" style:bottom="{bottom + 12}px" data-avoid><StoreyScrubber {session} /></div>
+    <div class="band" bind:clientHeight={top}>
+      <header class="top" data-avoid>
+        {@render who(false)}
+        <p class="disclose">Computer-generated model, not a photograph</p>
+      </header>
+      <div class="map" data-avoid><BlockOutline {session} /></div>
+    </div>
+    <div class="scale" style:top="{top + 8}px" style:bottom="{bottom + 4}px" data-avoid><StoreyScrubber {session} /></div>
     <div class="dock" bind:clientHeight={bottom} data-avoid>
+      <StoreyReadout {session} />
       <SunPill {session} />
       <div class="sheet glass">
         <FlatChooser {session} />
@@ -139,39 +156,57 @@
     opacity: 0;
     pointer-events: none;
   }
-  .leaving .top,
-  .leaving .panel {
+  .leaving > .band,
+  .leaving > .panel {
     transform: translateY(-14px);
   }
-  .leaving .dock,
-  .leaving .sun {
+  .leaving > .dock,
+  .leaving > .base {
     transform: translateY(20px);
   }
-  .leaving .scale,
-  .leaving .map {
+  .leaving > .scale,
+  .leaving > .map {
     transform: translateX(16px);
   }
 
-  /* ── Who the block is ── */
-  .top {
+  /* ── The band at the top of a phone: who the block is, and its outline ── */
+  /* Its height is the top inset, so the block is framed below it. It spans the width; touches between its parts reach the block. */
+  .bs > .band {
     position: absolute;
-    top: calc(var(--gutter) + var(--safe-t));
-    left: calc(var(--gutter) + var(--safe-l));
-    right: calc(var(--gutter) + var(--safe-r));
+    top: 0;
+    left: 0;
+    right: 0;
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    padding: calc(var(--gutter) + var(--safe-t)) calc(var(--gutter) + var(--safe-r)) 0 calc(var(--gutter) + var(--safe-l));
+    pointer-events: none;
+  }
+  .top {
+    flex: 1;
+    min-width: 0;
     animation: rise-in 600ms var(--ease-out) 120ms both;
-    /* It spans the width for its words; touches between them reach the block. */
     pointer-events: none;
     text-shadow:
       0 0 2px var(--surface),
       0 0 6px var(--surface),
       0 0 14px rgb(var(--surface-rgb) / 0.85);
   }
-  /* The way back on its own row, then the name under it, so the words get the width of the screen. */
+  /* The way back and the number on one row, as in the bar inside the flat; the road and the facts under them, the width of the band. */
   .who {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 10px;
+    display: grid;
+    grid-template-columns: 44px minmax(0, 1fr);
+    align-items: center;
+    column-gap: 10px;
+  }
+  .who:not(.big) .name {
+    display: contents;
+  }
+  .who:not(.big) .road,
+  .who:not(.big) .facts {
+    grid-column: 1 / -1;
+    padding-left: 2px;
   }
   .back,
   .src {
@@ -204,15 +239,11 @@
     min-width: 0;
     padding-left: 2px;
   }
-  /* Clear of the outline in the top right corner. */
-  .top .blk,
-  .top .road {
-    max-width: calc(100vw - 2 * var(--gutter) - 140px);
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
   /* Set large, the way the number is painted on the end wall of the block. */
   .blk {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
     font: 700 44px/0.82 var(--font-mark);
     letter-spacing: 0;
     text-transform: uppercase;
@@ -220,9 +251,15 @@
   }
   .road {
     margin-top: 6px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     font-size: 15px;
     font-weight: 600;
     letter-spacing: -0.01em;
+  }
+  .who:not(.big) .road {
+    margin-top: 4px;
   }
   .facts {
     margin-top: 2px;
@@ -234,6 +271,7 @@
     white-space: pre;
   }
   .src {
+    position: relative;
     display: inline-grid;
     place-items: center;
     width: 22px;
@@ -241,6 +279,12 @@
     margin: -4px 0;
     vertical-align: middle;
     color: var(--ink-2);
+  }
+  /* 44 px to the finger round an 11 px mark, over the space round it, without moving a word. */
+  .src::before {
+    content: '';
+    position: absolute;
+    inset: -13px -11px;
   }
   .src path {
     stroke-width: 1.4;
@@ -250,13 +294,20 @@
     font-size: 11px;
     color: var(--ink-2);
   }
+  .top .disclose {
+    margin-top: 6px;
+  }
 
   /* ── The outline and the scale ── */
   .map {
+    flex: none;
+    animation: rise-in 600ms var(--ease-out) 200ms both;
+    pointer-events: auto;
+  }
+  .bs > .map {
     position: absolute;
     top: calc(var(--gutter) + var(--safe-t));
     right: calc(var(--gutter) + var(--safe-r));
-    animation: rise-in 600ms var(--ease-out) 200ms both;
   }
   .scale {
     position: absolute;
@@ -387,7 +438,9 @@
     animation-delay: 200ms;
   }
   .who.big {
+    display: flex;
     flex-direction: column;
+    align-items: flex-start;
     gap: 22px;
   }
   .big .back {
@@ -415,21 +468,33 @@
     justify-content: flex-start;
     gap: 18px;
   }
-  .wide .map {
-    top: calc(var(--gutter) + var(--safe-t));
-  }
-  /* Under the outline, and clear of the sun at the bottom. */
+  /* Under the outline, and down to the band at the bottom. */
   .wide .scale {
     top: calc(var(--gutter) + var(--safe-t) + 214px);
-    bottom: calc(var(--gutter) + var(--safe-b) + 96px);
     right: calc(var(--gutter) + 8px + var(--safe-r));
   }
-  .sun {
+  /*
+   * The band along the bottom: the sun, and the storey at the foot of the scale. Its height is the bottom inset.
+   * Where the two do not fit side by side, the storey drops below the sun, still at the right under the scale.
+   */
+  .bs > .base {
     position: absolute;
-    right: calc(var(--gutter) + 300px);
-    bottom: calc(var(--gutter) + var(--safe-b));
-    max-width: 440px;
-    margin: 0 auto;
+    right: calc(var(--gutter) + var(--safe-r));
+    bottom: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 12px 24px;
+    padding-bottom: calc(var(--gutter) + var(--safe-b));
+    pointer-events: none;
     animation: rise-in 640ms var(--ease-out) 240ms both;
+  }
+  .sun {
+    flex: 1 1 240px;
+    max-width: 440px;
+    pointer-events: auto;
+  }
+  .base :global(.readout) {
+    margin-left: auto;
   }
 </style>

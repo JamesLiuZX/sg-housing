@@ -13,8 +13,8 @@
  */
 
 import { cacheGet, cachePut } from './cache';
-import { getJson, unavailable, untilAborted } from './http';
-import type { AddressHit, SearchHits, SearchResult } from './types';
+import { createLimiter, getJson, unavailable, untilAborted, type Limiter } from './http';
+import type { AddressHit, Result, SearchHits, SearchResult } from './types';
 
 export interface OneMapConfig {
   /** Replaces https://www.onemap.gov.sg, e.g. with a proxy that adds the token itself. */
@@ -179,8 +179,12 @@ function oneMapAnswers(): Promise<boolean | null> {
  * Fine to call on every keystroke behind a short debounce: pass the previous
  * call's AbortController signal so stale requests are cancelled.
  */
-export async function searchAddress(query: string, options: { signal?: AbortSignal; page?: number } = {}): Promise<SearchResult> {
-  const { signal, page = 1 } = options;
+export function searchAddress(query: string, options: { signal?: AbortSignal; page?: number } = {}): Promise<SearchResult> {
+  return search(query, options.page ?? 1, options.signal);
+}
+
+/** `searchAddress`, with requests that miss the cache paced by `limiter` when one is given. */
+async function search(query: string, page: number, signal?: AbortSignal, limiter?: Limiter): Promise<SearchResult> {
   const q = cleanQuery(query);
   if (!q) return { status: 'empty' };
   if (signal?.aborted) return { status: 'aborted' };
@@ -189,7 +193,7 @@ export async function searchAddress(query: string, options: { signal?: AbortSign
   const cached = cacheGet<SearchHits | null>(key);
   if (cached) return cached.data ? { status: 'ok', data: cached.data, fetchedAt: cached.fetchedAt } : { status: 'not-found' };
 
-  const r = await getJson(searchUrl(q, page), { service: 'onemap', signal, headers: await authHeaders(), retries: 1 });
+  const r = await getJson(searchUrl(q, page), { service: 'onemap', signal, headers: await authHeaders(), retries: 1, limiter });
   if (!r.ok) return r.result;
   const parsed = parseSearch(r.body, q);
   switch (parsed.kind) {
@@ -211,4 +215,29 @@ export async function searchAddress(query: string, options: { signal?: AbortSign
       return answers === false ? unavailable('onemap', 'auth', parsed.message) : unavailable('onemap', 'network', 'could not check whether OneMap is answering');
     }
   }
+}
+
+/**
+ * OneMap answers "429 Too Many Requests" to searches closer together than
+ * about a quarter of a second (seen November 2026). Work nobody is waiting
+ * for goes at half that pace, leaving room for what a person types.
+ */
+const background: Limiter = createLimiter(1, 500);
+
+/**
+ * The block at a postal code as OneMap names it: its number, its road in
+ * full and its position. For lookups nobody is waiting on, such as the
+ * streets of a block's neighbours, so requests are paced as above; answers
+ * share `searchAddress`'s cache.
+ *
+ * - `ok`: the block at that postal code.
+ * - `not-found`: OneMap has no block there (a road, a landmark, a typo).
+ * - `unavailable` and `aborted` as for `searchAddress`.
+ */
+export async function addressOfPostal(postal: string, options: { signal?: AbortSignal } = {}): Promise<Result<AddressHit>> {
+  if (!/^\d{6}$/.test(postal)) return { status: 'not-found' };
+  const r = await search(postal, 1, options.signal, background);
+  if (r.status !== 'ok') return r.status === 'empty' ? { status: 'not-found' } : r;
+  const hit = r.data.hits.find((h) => h.postal === postal && h.blk && h.road);
+  return hit ? { status: 'ok', data: hit, fetchedAt: r.fetchedAt } : { status: 'not-found' };
 }

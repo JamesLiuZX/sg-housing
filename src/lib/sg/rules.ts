@@ -46,8 +46,11 @@ const SOURCES = [HDB_BUILDING_WORKS, MYNICEHOME];
 /** The rule for bathroom finishes in a new flat. It rides on any wall that bounds a bathroom. */
 const THREE_YEARS = 'the bathroom wall and floor finishes cannot be removed for the first 3 years';
 
-const PARTITION_WHY =
-  "Non-structural. It can usually be removed or opened once HDB approves a permit, through a contractor listed in HDB's Directory of Renovation Contractors.";
+/*
+ * The chip above a reason gives the short answer, here "with an HDB permit",
+ * so the reason gives what the chip leaves out, in two lines on a phone.
+ */
+const PARTITION_WHY = "Non-structural. The work must be done by a contractor from HDB's Directory of Renovation Contractors.";
 
 const BY_KIND: Record<Exclude<WallKind, 'parapet'>, Verdict> = {
   external: {
@@ -61,7 +64,7 @@ const BY_KIND: Record<Exclude<WallKind, 'parapet'>, Verdict> = {
     tone: 'no',
     title: 'Structural wall',
     chip: 'Cannot be hacked',
-    why: 'Reinforced concrete that holds the block up, so it cannot be hacked. Structural walls are the thick lines on the HDB floor plan.',
+    why: 'Reinforced concrete that holds the block up. Structural walls are the thick lines on the HDB floor plan.',
     sources: SOURCES
   },
   shelter: {

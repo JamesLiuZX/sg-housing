@@ -27,6 +27,11 @@ export class Tweens {
     return this.jobs.length > 0;
   }
 
+  /** Whether a job with this tag is running. */
+  has(tag: string): boolean {
+    return this.jobs.some((j) => j.tag === tag);
+  }
+
   run(tag: string, dur: number, fn: (k: number) => void, opts: { ease?: Ease; delay?: number } = {}): Promise<void> {
     this.kill(tag);
     return new Promise((resolve) => {

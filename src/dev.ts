@@ -7,7 +7,8 @@
  * ?month=5 sets the month (0 to 11); ?lens=sun|rules|space; ?inset=330 reserves that many pixels at
  * the bottom, as the interface's controls do (330 is the sun controls on a phone);
  * ?plan=bto-3room-68 shows another template from the library (the hero when left out); ?mirror=1 shows
- * it the other way round, as its twin across the party wall.
+ * it the other way round, as its twin across the party wall; ?walk=living stands in a room (?walk=1 at the
+ * front door) with no flight in, looking at its window, with ?skip=1.
  *
  * The plan is validated on load and every issue goes to the console, so a layout
  * being drawn shows its mistakes in the same place as its model.
@@ -18,6 +19,7 @@ import { mirror } from './lib/plan/mirror';
 import { templateById } from './lib/plan/templates';
 import { validatePlan } from './lib/plan/validate';
 import { dayPath, sunAt, type SunDate } from './lib/sg/solar';
+import { roomView } from './lib/ui/pins';
 
 const q = new URLSearchParams(location.search);
 const date: SunDate = { year: 2026, month: Number(q.get('month') ?? 5), day: 21 };
@@ -67,6 +69,11 @@ void (async () => {
     viewer.jump(inset);
     const lens = q.get('lens') as Lens | null;
     if (lens) viewer.setLens(lens);
+    const walk = q.get('walk');
+    if (walk) {
+      const view = walk === '1' ? null : roomView(plan, walk);
+      await viewer.enterWalk(view?.at, view?.lookAt, { now: true });
+    }
     api.ready = true;
     return;
   }

@@ -1,61 +1,49 @@
 <script lang="ts">
-  import type { Facade, Ring } from '../data';
+  import type { Facade } from '../data';
+  import { flatPoint, groundBox, nearestSide, onFootprint, sameSide, shapePath, sideMarks } from './outline';
   import { facingWords } from './place';
   import type { Session } from './session.svelte';
 
   /**
    * The block from above, north up, as HDB surveyed it, with its neighbours
-   * faint around it. Each side a person would point at is a target: tap it,
-   * or tab to it, to say the living room looks out that way. The chosen side
-   * is drawn in sun orange with the view out of it, so the bearing the sun
-   * is worked from is never in doubt.
+   * faint around it. A tap anywhere on it names the side nearest the finger,
+   * and where along that side the flat is, so even a short side has the
+   * whole drawing for a target; keys reach each side in turn. The chosen side
+   * is drawn in sun orange with the view out of it, so the bearing the sun is
+   * worked from is never in doubt.
    */
   let { session }: { session: Session } = $props();
 
   const block = $derived(session.block);
-  /** Metres of ground shown round the block. */
-  const box = $derived.by(() => {
-    if (!block) return { x: -10, y: -10, w: 20, h: 20 };
-    const b = block.footprint.bounds;
-    const side = Math.max(b.maxX - b.minX, b.maxY - b.minY) * 1.5 + 16;
-    const cx = (b.minX + b.maxX) / 2;
-    const cy = (b.minY + b.maxY) / 2;
-    // SVG runs y down the page; north is up, so y is flipped.
-    return { x: cx - side / 2, y: -cy - side / 2, w: side, h: side };
-  });
+  const box = $derived(groundBox(block?.footprint ?? null));
+  const own = $derived(block ? shapePath(block.footprint.parts) : '');
+  const near = $derived(block ? block.neighbours.map((n) => shapePath(n.footprint.parts)).join('') : '');
 
-  const ring = (r: Ring) => `M${r.map(([x, y]) => `${x.toFixed(1)} ${(-y).toFixed(1)}`).join('L')}Z`;
-  const shape = (parts: { outer: Ring; holes: Ring[] }[]) => parts.map((p) => ring(p.outer) + p.holes.map(ring).join('')).join('');
+  const sides = $derived(session.sides.map((f) => ({ f, ...sideMarks(f, box), words: facingWords(f.bearing) })));
+  const chosen = $derived(session.facade);
+  const flat = $derived(chosen ? flatPoint(chosen, session.along) : null);
 
-  const own = $derived(block ? shape(block.footprint.parts) : '');
-  const near = $derived(block ? block.neighbours.map((n) => shape(n.footprint.parts)).join('') : '');
+  let svg = $state<SVGSVGElement>();
+  /** The side a mouse over the drawing would choose, so a click is never a surprise. */
+  let hover = $state(-1);
 
-  /** A side, stood off the wall a little so it reads as "this side" rather than as the wall. */
-  function band(f: Facade) {
-    const r = (f.bearing * Math.PI) / 180;
-    const ox = Math.sin(r);
-    const oy = -Math.cos(r);
-    const off = box.w * 0.035;
-    const p = (x: number, y: number, k = off) => `${(x + ox * k).toFixed(1)} ${(-y + oy * k).toFixed(1)}`;
-    const mx = f.mid[0];
-    const my = f.mid[1];
-    return {
-      line: `M${p(f.a[0], f.a[1])}L${p(f.b[0], f.b[1])}`,
-      ray: `M${p(mx, my, off * 1.8)}L${p(mx, my, off * 5)}`,
-      head: { x: mx + ox * off * 5, y: -my + oy * off * 5, angle: f.bearing }
-    };
+  /** The side under a pointer, through the drawing's own coordinates. */
+  function sideAt(e: PointerEvent): { index: number; along: number } | null {
+    const m = svg?.getScreenCTM();
+    if (!m || !block) return null;
+    const p = new DOMPoint(e.clientX, e.clientY).matrixTransform(m.inverse());
+    return nearestSide(session.sides, p.x, p.y, onFootprint(block.footprint.parts, p.x, p.y));
   }
 
-  const sides = $derived(session.sides.map((f) => ({ f, ...band(f), words: facingWords(f.bearing) })));
-  const chosen = $derived(session.facade);
-  const isChosen = (f: Facade) => !!chosen && chosen.part === f.part && chosen.ring === f.ring && chosen.bearing === f.bearing && chosen.length === f.length;
+  function pick(e: PointerEvent): void {
+    if (e.button !== 0) return;
+    const hit = sideAt(e);
+    if (hit) session.chooseSide(session.sides[hit.index], hit.along);
+  }
 
-  /** Where the flat sits along the chosen side. */
-  const flat = $derived.by(() => {
-    if (!chosen) return null;
-    const t = session.along;
-    return { x: chosen.a[0] + (chosen.b[0] - chosen.a[0]) * t, y: -(chosen.a[1] + (chosen.b[1] - chosen.a[1]) * t) };
-  });
+  function point(e: PointerEvent): void {
+    hover = e.pointerType === 'mouse' ? (sideAt(e)?.index ?? -1) : -1;
+  }
 
   function key(e: KeyboardEvent, f: Facade): void {
     if (e.key !== 'Enter' && e.key !== ' ') return;
@@ -66,22 +54,30 @@
 
 {#if block}
   <figure class="outline glass" aria-label="Blk {block.blk} from above, north up">
-    <svg viewBox="{box.x} {box.y} {box.w} {box.h}" role="group" aria-label="Sides of the block">
+    <!-- The pointer reaches the sides through the whole drawing; each side is also its own button for keys and screen readers. -->
+    <svg
+      bind:this={svg}
+      viewBox="{box.x} {box.y} {box.w} {box.h}"
+      role="group"
+      aria-label="Sides of the block"
+      onpointerup={pick}
+      onpointermove={point}
+      onpointerleave={() => (hover = -1)}
+    >
       <path class="near" d={near} />
       <path class="own" d={own} />
       {#each sides as s, i (i)}
-        {@const on = isChosen(s.f)}
+        {@const on = sameSide(chosen, s.f)}
         <g
           class="side"
           class:on
+          class:hover={hover === i}
           role="button"
           tabindex="0"
           aria-pressed={on}
           aria-label="Living room faces {s.words.point}, {s.words.deg} degrees"
-          onclick={() => session.chooseSide(s.f)}
           onkeydown={(e) => key(e, s.f)}
         >
-          <path class="hit" d={s.line} />
           <path class="edge" d={s.line} />
           {#if on}
             <path class="ray" d={s.ray} />
@@ -105,7 +101,7 @@
   .outline {
     position: relative;
     margin: 0;
-    width: 120px;
+    width: 112px;
     padding: 6px;
     border-radius: 18px;
     pointer-events: auto;
@@ -116,6 +112,8 @@
     height: auto;
     aspect-ratio: 1;
     overflow: visible;
+    cursor: pointer;
+    touch-action: manipulation;
   }
   .near {
     fill: rgb(var(--ink-rgb) / 0.07);
@@ -129,16 +127,9 @@
     stroke-linejoin: round;
   }
   .side {
-    cursor: pointer;
     outline: none;
-  }
-  /* A fat, invisible stroke: the target is far bigger than the line a person sees. */
-  .hit {
-    fill: none;
-    stroke: transparent;
-    stroke-width: 18px;
-    vector-effect: non-scaling-stroke;
-    stroke-linecap: round;
+    /* The drawing as a whole takes the pointer; see sideAt. */
+    pointer-events: none;
   }
   .edge {
     fill: none;
@@ -149,11 +140,9 @@
     stroke-dasharray: 2 3;
     transition: stroke 160ms;
   }
-  @media (hover: hover) {
-    .side:hover .edge {
-      stroke: var(--ink);
-      stroke-dasharray: none;
-    }
+  .side.hover .edge {
+    stroke: var(--ink);
+    stroke-dasharray: none;
   }
   .side:focus-visible .edge {
     stroke: var(--ink);
@@ -187,6 +176,7 @@
     right: 9px;
     font: 700 11px/1 var(--font-mark);
     color: var(--sun-ink);
+    pointer-events: none;
   }
   @media (min-width: 820px) {
     .outline {

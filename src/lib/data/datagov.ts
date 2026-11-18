@@ -13,7 +13,7 @@
 import { cacheGet, cachePut } from './cache';
 import { createLimiter, getJson, untilAborted, type Limiter } from './http';
 import { hdbBlock, hdbStreet, streetKey } from './street';
-import type { BlockFacts, DataSource, FlatType, LayoutSeen, Resale, ResaleSummary, Result, UnitCount } from './types';
+import type { BlockFacts, BlockHeight, BuildingKind, DataSource, FlatType, LayoutSeen, Resale, ResaleSummary, Result, UnitCount } from './types';
 
 export const PROPERTY_RESOURCE = 'd_17f5382f26140b1fdae0ba2ef6239d2f';
 export const RESALE_RESOURCE = 'd_8b84c4ee58e3cfc0ece0d773c8ca6abc';
@@ -277,4 +277,117 @@ export function blockResales(blk: string, street: string, options: { signal?: Ab
     },
     options.signal
   );
+}
+
+// ---------------------------------------------------------------------------
+// Heights of several buildings at once: what a block's neighbours need for their shadows.
+
+/** The Property Information columns a building's height and kind are read from: under a third of a full row. */
+export const HEIGHT_FIELDS: readonly string[] = Object.freeze([
+  'blk_no',
+  'street',
+  'max_floor_lvl',
+  'residential',
+  'commercial',
+  'market_hawker',
+  'multistorey_carpark',
+  'precinct_pavilion'
+]);
+
+/** HDB's tallest blocks have 50 storeys; a record far past that is a slip in the data, not a building. */
+const MAX_STOREYS = 60;
+
+/**
+ * Storeys for a building whose record has no usable height, by kind: the
+ * commonest height of each kind in Property Information (November 2026, when
+ * every record had one), so a car park or a market is never drawn as a tower.
+ * A block of flats without a usable height gets no answer instead, and keeps
+ * the engine's typical block.
+ */
+const TYPICAL_STOREYS: Readonly<Partial<Record<BuildingKind, number>>> = Object.freeze({ carpark: 5, market: 1, commercial: 2, pavilion: 1, other: 1 });
+
+/** No block number has more rows than this (Blk 1 has 36, on as many streets), so a search by number alone gets them all. */
+const ROWS_PER_NUMBER = 50;
+
+const flag = (r: Record<string, unknown>, column: string): boolean => text(r[column]).toUpperCase() === 'Y';
+
+/**
+ * What a Property Information row says a building is. Flats come first, as a
+ * tower over shops or a market is still a tower; then a car park, whatever is
+ * at its foot. Pure.
+ */
+export function buildingKind(r: Record<string, unknown>): BuildingKind {
+  if (flag(r, 'residential')) return 'residential';
+  if (flag(r, 'multistorey_carpark')) return 'carpark';
+  if (flag(r, 'market_hawker')) return 'market';
+  if (flag(r, 'commercial')) return 'commercial';
+  if (flag(r, 'precinct_pavilion')) return 'pavilion';
+  return 'other';
+}
+
+/** A building's height and kind from its Property Information row, or null when nothing can be drawn from it. Pure; exported for tests. */
+export function toHeight(r: Record<string, unknown>, postal: string): BlockHeight | null {
+  const blk = text(r.blk_no).toUpperCase();
+  const street = text(r.street).toUpperCase();
+  if (!blk || !street) return null;
+  const kind = buildingKind(r);
+  const floors = int(r.max_floor_lvl);
+  const storeys = floors >= 1 && floors <= MAX_STOREYS ? floors : TYPICAL_STOREYS[kind];
+  return storeys ? { postal, blk, street, storeys, kind } : null;
+}
+
+/** A building to ask about: its postal code, and its block number and street in any spelling. */
+export interface BlockRef {
+  postal: string;
+  blk: string;
+  street: string;
+}
+
+const unique = (xs: string[]): string[] => [...new Set(xs)];
+
+function heightQuery(blks: string[], streets: string[] | null, limit: number): Record<string, string> {
+  // data.gov.sg takes a list of values per column: a row matches any value in each list, and every list.
+  const filters: Record<string, string[]> = streets ? { blk_no: blks, street: streets } : { blk_no: blks };
+  return { filters: JSON.stringify(filters), fields: HEIGHT_FIELDS.join(','), limit: String(limit) };
+}
+
+/**
+ * Property Information's answer for each of `refs`, in their order, from as
+ * few datastore searches as data.gov.sg allows: one for every block number
+ * asked about on every street asked about (rows that pair one block's number
+ * with another's street are dropped), and a second, by number alone, only for
+ * a street spelt some way HDB does not, matched loosely as `blockFacts` does.
+ * Both are paced with every other data.gov.sg request. Never rejects.
+ */
+export async function blockHeights(refs: readonly BlockRef[], options: { signal?: AbortSignal } = {}): Promise<Result<BlockHeight>[]> {
+  const { signal } = options;
+  const asks = refs.map((r) => ({ postal: r.postal, blk: hdbBlock(r.blk), street: hdbStreet(r.street) }));
+  const out: Result<BlockHeight>[] = asks.map(() => ({ status: 'not-found' }));
+  const use = (i: number, row: Record<string, unknown>): void => {
+    const h = toHeight(row, asks[i].postal);
+    out[i] = h ? { status: 'ok', data: h, fetchedAt: Date.now() } : { status: 'not-found' };
+  };
+
+  let open = asks.flatMap((a, i) => (a.blk && a.street ? [i] : []));
+  if (!open.length) return out;
+  const blks = unique(open.map((i) => asks[i].blk));
+  const streets = unique(open.map((i) => asks[i].street));
+  const exact = await datastore(PROPERTY_RESOURCE, heightQuery(blks, streets, blks.length * streets.length), signal);
+  if (!exact.ok) return out.map((r, i) => (open.includes(i) ? exact.result : r));
+  open = open.filter((i) => {
+    const row = exact.records.find((r) => text(r.blk_no).toUpperCase() === asks[i].blk && text(r.street).toUpperCase() === asks[i].street);
+    if (row) use(i, row);
+    return !row;
+  });
+  if (!open.length) return out;
+
+  const numbers = unique(open.map((i) => asks[i].blk));
+  const loose = await datastore(PROPERTY_RESOURCE, heightQuery(numbers, null, numbers.length * ROWS_PER_NUMBER), signal);
+  if (!loose.ok) return out.map((r, i) => (open.includes(i) ? loose.result : r));
+  for (const i of open) {
+    const want = streetKey(asks[i].street);
+    const row = loose.records.find((r) => text(r.blk_no).toUpperCase() === asks[i].blk && streetKey(text(r.street)) === want);
+    if (row) use(i, row);
+  }
+  return out;
 }
