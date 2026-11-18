@@ -1,5 +1,5 @@
 import { Spring, prefersReducedMotion } from 'svelte/motion';
-import { facadeFacing, facades, type Block, type BlockFacts, type BlockLookup, type Facade, type ResaleSummary } from '../data';
+import { facadeFacing, facades, knownNeighbourHeights, type Block, type BlockFacts, type BlockLookup, type Facade, type ResaleSummary } from '../data';
 import type { Lens } from '../engine/Viewer';
 import { northForFacing } from '../plan/facing';
 import { mirror } from '../plan/mirror';
@@ -74,6 +74,12 @@ export class Session {
 
   /** Everything looked up about the block. Null for the typical flat. */
   place = $state.raw<BlockLookup | null>(null);
+  /**
+   * Storeys of the block's neighbours where known, by postal code: from the
+   * bundled snapshot or the device at once, the rest as data.gov.sg answers.
+   * One left out is drawn at a typical height.
+   */
+  neighbourStoreys = $state.raw<Record<string, number>>({});
   storey = $state(1);
   /** The side of the block the living room faces, and where along it the flat sits, 0 to 1. */
   facade = $state.raw<Facade | null>(null);
@@ -144,6 +150,7 @@ export class Session {
   /** Arrives at a block, with what a link asked for or the likeliest first choices. */
   arrive(lookup: BlockLookup, want: Arrival = {}): void {
     this.place = lookup;
+    this.neighbourStoreys = this.block ? knownNeighbourHeights(this.block).storeys : {};
     this.setStorey(want.storey ?? usualStorey(lookup, this.storeys));
     const options = this.options;
     const asked = want.type ? (options.find((o) => o.flatType === want.type) ?? { flatType: want.type }) : null;
@@ -156,6 +163,7 @@ export class Session {
   /** Back to the typical flat and the poster. */
   leave(): void {
     this.place = null;
+    this.neighbourStoreys = {};
     this.option = null;
     this.candidate = null;
     this.facade = null;

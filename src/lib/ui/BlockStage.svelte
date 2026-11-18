@@ -183,6 +183,16 @@
     padding: calc(var(--gutter) + var(--safe-t)) calc(var(--gutter) + var(--safe-r)) 0 calc(var(--gutter) + var(--safe-l));
     pointer-events: none;
   }
+  /* The block is framed below the band, but its neighbours stand where they stand; the scene fades into the paper under the words. */
+  .bs > .band::before {
+    content: '';
+    position: absolute;
+    inset: 0 0 -32px;
+    background: linear-gradient(to bottom, rgb(var(--surface-rgb) / 0.78), rgb(var(--surface-rgb) / 0.6) 62%, rgb(var(--surface-rgb) / 0));
+  }
+  .band > * {
+    position: relative;
+  }
   .top {
     flex: 1;
     min-width: 0;

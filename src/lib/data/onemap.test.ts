@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cacheClear, setCacheStorage } from './cache';
 import { blocked, json, mockFetch } from './fetch.fixture';
-import { cleanQuery, configureOneMap, parseSearch, searchAddress } from './onemap';
+import { addressOfPostal, cleanQuery, configureOneMap, parseSearch, searchAddress } from './onemap';
 
 const NOTICE = 'Authentication token missing. Please create an account and generate or renew your API Token.';
 
@@ -47,7 +47,10 @@ beforeEach(() => {
   cacheClear();
   configureOneMap({});
 });
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
 
 describe('cleanQuery', () => {
   it.each([
@@ -166,5 +169,69 @@ describe('searchAddress', () => {
     const pending = searchAddress('440A Clementi', { signal: ctl.signal });
     ctl.abort();
     expect(await pending).toEqual({ status: 'aborted' });
+  });
+});
+
+/** OneMap's answer for postal code 122440 on 18 Nov 2026: 440A's neighbour 440B. */
+const TOWER = {
+  found: 1,
+  totalNumPages: 1,
+  pageNum: 1,
+  results: [
+    {
+      SEARCHVAL: 'CLEMENTI CASCADIA',
+      BLK_NO: '440B',
+      ROAD_NAME: 'CLEMENTI AVENUE 3',
+      BUILDING: 'CLEMENTI CASCADIA',
+      ADDRESS: '440B CLEMENTI AVENUE 3 CLEMENTI CASCADIA SINGAPORE 122440',
+      POSTAL: '122440',
+      X: '20237.25342737418',
+      Y: '33168.68757573515',
+      LATITUDE: '1.316239365382066',
+      LONGITUDE: '103.7635663758005'
+    }
+  ]
+};
+
+describe('addressOfPostal', () => {
+  it('finds the block at a postal code, with its road in full', async () => {
+    const calls = mockFetch(() => json(TOWER));
+    expect(await addressOfPostal('122440')).toMatchObject({ status: 'ok', data: { blk: '440B', road: 'CLEMENTI AVENUE 3', postal: '122440' } });
+    expect(calls[0].url.searchParams.get('searchVal')).toBe('122440');
+  });
+
+  it('says "not found" where OneMap has no block, and sends nothing for what is not a postal code', async () => {
+    const calls = mockFetch(() => json(ROAD_ONLY));
+    expect(await addressOfPostal('129999')).toEqual({ status: 'not-found' });
+    expect(await addressOfPostal('Clementi')).toEqual({ status: 'not-found' });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("shares the answers a person's own search already has", async () => {
+    const calls = mockFetch(() => json(TOWER));
+    await searchAddress('122440');
+    expect(await addressOfPostal('122440')).toMatchObject({ status: 'ok' });
+    expect(calls).toHaveLength(1);
+  });
+
+  it('fails soft when the network is blocked', async () => {
+    mockFetch(blocked);
+    expect(await addressOfPostal('122440')).toMatchObject({ status: 'unavailable', service: 'onemap', reason: 'network' });
+  });
+
+  it('keeps half a second between requests, in the order they were asked', async () => {
+    vi.useFakeTimers();
+    const asked: [string | null, number][] = [];
+    mockFetch((url) => {
+      const postal = url.searchParams.get('searchVal');
+      asked.push([postal, Date.now()]);
+      return json({ ...TOWER, results: [{ ...TOWER.results[0], POSTAL: postal }] });
+    });
+    const answers = ['120001', '120002', '120003'].map((p) => addressOfPostal(p));
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(await Promise.all(answers)).toMatchObject([{ status: 'ok' }, { status: 'ok' }, { status: 'ok' }]);
+    expect(asked.map(([p]) => p)).toEqual(['120001', '120002', '120003']);
+    expect(asked[1][1] - asked[0][1]).toBeGreaterThanOrEqual(500);
+    expect(asked[2][1] - asked[1][1]).toBeGreaterThanOrEqual(500);
   });
 });

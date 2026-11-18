@@ -6,6 +6,8 @@
  *   if (found.status === 'ok') {
  *     const { block, facts, resales } = await lookupBlock(found.data.hits[0]);
  *     if (block.status === 'ok') facades(block.data.footprint);   // sides to tap
+ *     // Neighbours' heights: what is known at once, then the rest as it arrives.
+ *     if (block.status === 'ok') void lookupNeighbourHeights(block.data, { signal, onProgress });
  *   }
  *
  * Every async function resolves to a `Result` (ok, not-found, unavailable,
@@ -27,6 +29,7 @@ export {
   type DataGovConfig
 } from './datagov';
 export { lookupBlock } from './lookup';
+export { knownNeighbourHeights, lookupNeighbourHeights, type NeighbourLookupOptions } from './neighbours';
 export { lookupDemo, demoHit, isDemoHit, DEMO_POSTAL, DEMO_TAKEN, type DemoLookup } from './demo';
 export { hdbStreet, streetKey, hdbBlock } from './street';
 export { cacheClear as clearDataCache } from './cache';

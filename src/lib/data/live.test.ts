@@ -3,20 +3,24 @@
  *
  *   BLK_LIVE=1 npx vitest run src/lib/data/live.test.ts
  *
- * About a dozen requests in all, paced by the data layer's own limiter, so it
- * stays well inside data.gov.sg's public rate limit.
+ * About forty requests in all, paced by the data layer's own limiters (OneMap
+ * one every half second for neighbours, data.gov.sg four per ten seconds), so
+ * it stays well inside both services' public limits. Takes about half a minute.
  */
 
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import realManifest from '../../../public/blocks/manifest.json?raw';
 import realSector12 from '../../../public/blocks/12.json?raw';
-import { configureBlocks } from './blocks';
+import { configureBlocks, loadBlock } from './blocks';
 import { cacheClear, setCacheStorage } from './cache';
-import { blockFacts } from './datagov';
+import { blockFacts, blockHeights, type BlockRef } from './datagov';
+import { lookupDemo, snapshotHeights } from './demo';
 import { facades } from './facades';
 import { lookupBlock } from './lookup';
-import { searchAddress } from './onemap';
+import { lookupNeighbourHeights } from './neighbours';
+import { addressOfPostal, searchAddress } from './onemap';
 import { hdbStreet } from './street';
+import type { NeighbourHeights } from './types';
 
 const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {};
 const LIVE = env.BLK_LIVE === '1';
@@ -75,5 +79,34 @@ describe.skipIf(!LIVE)('live services', () => {
     expect(hdbStreet(hit.road)).toBe(hdb);
     const facts = await blockFacts(hit.blk, hit.road);
     expect(facts).toMatchObject({ status: 'ok', data: { street: hdb } });
+  });
+
+  it("the snapshot's neighbour heights are what OneMap and data.gov.sg say today", { timeout: 60000 }, async () => {
+    const { neighbours } = lookupDemo().block.data;
+    const refs: BlockRef[] = [];
+    for (const n of neighbours) {
+      const at = await addressOfPostal(n.postal);
+      if (at.status !== 'ok') throw new Error(`${n.postal}: ${at.status}`);
+      refs.push({ postal: n.postal, blk: n.blk, street: at.data.road });
+    }
+    const live = await blockHeights(refs);
+    expect(live.map((r) => (r.status === 'ok' ? r.data : r.status))).toEqual(neighbours.map((n) => snapshotHeights().get(n.postal) ?? 'not-found'));
+  });
+
+  it('finds the nearest eight neighbours of a block the snapshot does not cover, as answers arrive', { timeout: 90000 }, async () => {
+    // Blk 105 elsewhere in Clementi: none of its neighbours is in the snapshot, so every height comes live.
+    const block = await loadBlock('120105');
+    if (block.status !== 'ok') throw new Error(block.status);
+    const progress: NeighbourHeights[] = [];
+    const r = await lookupNeighbourHeights(block.data, { onProgress: (h) => progress.push(h) });
+    expect(progress.length).toBeGreaterThanOrEqual(1);
+    expect(progress[progress.length - 1]).toEqual(r);
+    expect(r.found.length + r.missing.length).toBe(8);
+    expect(r.found.length).toBeGreaterThanOrEqual(6);
+    for (const h of r.found) expect(h.storeys, h.blk).toBeGreaterThanOrEqual(1);
+    for (const h of r.found) expect(h.storeys, h.blk).toBeLessThanOrEqual(50);
+    // An answer is the block's own row, as blockFacts finds it on its own.
+    const [nearest] = r.found;
+    expect(await blockFacts(nearest.blk, nearest.street)).toMatchObject({ status: 'ok', data: { storeys: nearest.storeys } });
   });
 });

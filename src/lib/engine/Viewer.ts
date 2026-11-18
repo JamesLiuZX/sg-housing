@@ -1542,9 +1542,9 @@ export class Viewer {
     this.mode = 'block';
     this.closeBlock();
     this.pad = bottom;
-    this.padX = 0;
+    if (!keep) this.padX = 0;
     this.applyView();
-    // Rebuilt in place, the view stays where the person left it; anything else starts framed.
+    // Rebuilt in place, the view stays where the person left it, side inset and all; anything else starts framed.
     if (!keep) {
       const a = this.blockAngles();
       const f = this.blockFraming(a.theta, a.phi);

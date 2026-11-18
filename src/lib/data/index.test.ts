@@ -15,6 +15,8 @@ describe('the public surface', () => {
       'blockResales',
       'hdbStreet',
       'lookupDemo',
+      'knownNeighbourHeights',
+      'lookupNeighbourHeights',
       'configureOneMap',
       'configureDataGov',
       'configureBlocks',

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { DEMO_POSTAL, isDemoHit, lookupBlock, lookupDemo, searchAddress, type AddressHit, type BlockLookup } from './lib/data';
+  import { fade } from 'svelte/transition';
+  import { DEMO_POSTAL, isDemoHit, lookupBlock, lookupDemo, lookupNeighbourHeights, searchAddress, type AddressHit, type BlockLookup } from './lib/data';
   import { Viewer, type Hooks, type Lens } from './lib/engine/Viewer';
   import { Atmosphere } from './lib/ui/atmosphere';
   import BlockStage from './lib/ui/BlockStage.svelte';
@@ -54,6 +55,8 @@
   /** True once the camera has landed inside after walking in. */
   let landed = $state(false);
   const wide = $derived(vw >= 820);
+  /** The camera is travelling between stages, the opening or a push, with no stage's words on screen. */
+  const traveling = $derived(session.stage === 'opening' || session.stage === 'entering' || session.stage === 'leaving');
 
   /** The block being looked up, for the poster to say so, and what went wrong if it did. */
   let finding = $state<string | null>(null);
@@ -83,6 +86,8 @@
   let blockFramed: { bottom: number; top: number } | null = null;
   /** The storey the block last reported, so it is not sent straight back. */
   let heard = 0;
+  /** The neighbours' storeys the block on screen was built with, so it is rebuilt only for new ones. */
+  let builtWith: Record<string, number> | null = null;
 
   const hooks: Hooks = {
     frame: () => frames.forEach((f) => f()),
@@ -207,6 +212,26 @@
     const along = session.along;
     if (!facade || session.stage !== 'block') return;
     untrack(() => viewer?.setUnit({ storey, facade, along }));
+  });
+  // Once a block is on screen, its nearest neighbours' heights are asked for; a new block or the poster cancels that.
+  $effect(() => {
+    const block = session.block;
+    if (!block || !viewer) return;
+    const ctl = new AbortController();
+    void lookupNeighbourHeights(block, { signal: ctl.signal, onProgress: (h) => (session.neighbourStoreys = h.storeys) });
+    return () => ctl.abort();
+  });
+  // New heights rebuild the block in place, keeping the view, the storey and the unit. Only at the block stage:
+  // anywhere else showBlock would pull the person out of the flat, so heights that come meanwhile are drawn on the way back.
+  $effect(() => {
+    const v = viewer;
+    const block = session.block;
+    const storeys = session.neighbourStoreys;
+    if (!v || !block || session.stage !== 'block' || storeys === builtWith) return;
+    untrack(() => {
+      builtWith = storeys;
+      v.showBlock({ block, storeys: session.storeys, label: block.blk, neighbourStoreys: storeys }, blockGuess());
+    });
   });
 
   $effect(() => {
@@ -333,7 +358,8 @@
     } else {
       blockFramed = null;
     }
-    v.showBlock({ block, storeys: session.storeys, label: block.blk }, bottom);
+    builtWith = session.neighbourStoreys;
+    v.showBlock({ block, storeys: session.storeys, label: block.blk, neighbourStoreys: builtWith }, bottom);
     heard = session.storey;
     v.setStorey(session.storey);
     if (session.facade) v.setUnit({ storey: session.storey, facade: session.facade, along: session.along });
@@ -439,5 +465,32 @@
     {#if viewer && session.stage === 'walk'}
       <WalkHud {viewer} {session} {frames} {landed} onexit={() => void viewer?.exitWalk()} />
     {/if}
+
+    <!-- The standing disclosure, while the camera travels and the stage it left has taken its own words away.
+         Going in, it waits for those words to fade; coming back out to the block, there are none to wait for. -->
+    {#if traveling}
+      <p class="standing" in:fade={{ duration: ms(200), delay: ms(session.stage === 'leaving' ? 0 : 280) }} out:fade={{ duration: ms(300) }}>
+        Computer-generated model, not a photograph
+      </p>
+    {/if}
   </div>
 </div>
+
+<style>
+  .standing {
+    position: absolute;
+    top: calc(var(--gutter) + var(--safe-t));
+    left: calc(var(--gutter) + var(--safe-l));
+    font-size: 11px;
+    color: var(--ink-2);
+    pointer-events: none;
+    text-shadow:
+      0 0 3px var(--surface),
+      0 0 8px var(--surface);
+  }
+  @media (min-width: 820px) {
+    .standing {
+      font-size: 12px;
+    }
+  }
+</style>

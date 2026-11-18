@@ -3,11 +3,14 @@ import realManifest from '../../../public/blocks/manifest.json?raw';
 import realSector12 from '../../../public/blocks/12.json?raw';
 import snapshotSource from './demo-snapshot.ts?raw';
 import { configureBlocks, loadBlock } from './blocks';
-import { DEMO_POSTAL, DEMO_TAKEN, demoHit, isDemoHit, lookupDemo } from './demo';
+import { HEIGHT_FIELDS } from './datagov';
+import { DEMO_POSTAL, DEMO_TAKEN, demoHit, isDemoHit, lookupDemo, snapshotHeights } from './demo';
 import { facades } from './facades';
 import { mockFetch } from './fetch.fixture';
+import { knownNeighbourHeights } from './neighbours';
 import { isShard } from './shard';
-import { SNAPSHOT_SHARD } from './demo-snapshot';
+import { hdbStreet } from './street';
+import { SNAPSHOT_HEIGHTS, SNAPSHOT_SHARD } from './demo-snapshot';
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -61,6 +64,38 @@ describe('the bundled demo block', () => {
     a.facts.data.storeys = 0;
     expect(lookupDemo().block.data.footprint.parts.length).toBeGreaterThan(0);
     expect(lookupDemo().facts.data.storeys).toBe(30);
+  });
+
+  it('carries the height of every neighbour, as OneMap and data.gov.sg gave it', () => {
+    const { block } = lookupDemo();
+    const heights = knownNeighbourHeights(block.data);
+    expect(heights.missing).toEqual([]);
+    expect(heights.found.map((h) => h.postal)).toEqual(block.data.neighbours.map((n) => n.postal));
+    // Nearest first, as HDB Property Information had them on 18 November 2026.
+    expect(heights.found.map((h) => `${h.blk} ${h.street}: ${h.storeys} ${h.kind}`)).toEqual([
+      '440 CLEMENTI AVE 3: 3 carpark',
+      '440B CLEMENTI AVE 3: 40 residential',
+      "441 C'WEALTH AVE WEST: 7 other",
+      '440C CLEMENTI AVE 3: 40 residential',
+      '439 CLEMENTI AVE 3: 1 pavilion',
+      '320 CLEMENTI AVE 4: 10 residential',
+      '441B CLEMENTI AVE 3: 40 residential',
+      '319 CLEMENTI AVE 4: 10 residential',
+      '442 CLEMENTI AVE 3: 4 residential',
+      '441A CLEMENTI AVE 3: 40 residential',
+      '318A CLEMENTI AVE 4: 2 carpark',
+      '443 CLEMENTI AVE 3: 2 residential'
+    ]);
+  });
+
+  it("knows the block's own height too, for the blocks it neighbours", () => {
+    expect(snapshotHeights().get(DEMO_POSTAL)).toEqual({ postal: DEMO_POSTAL, blk: '440A', street: 'CLEMENTI AVE 3', storeys: 30, kind: 'residential' });
+  });
+
+  it("names each neighbour's street as OneMap does, which HDB's spelling turns into Property Information's", () => {
+    const { columns, rows } = SNAPSHOT_HEIGHTS;
+    expect(columns).toEqual(['postal', 'road', ...HEIGHT_FIELDS]);
+    for (const r of rows) expect(hdbStreet(r[columns.indexOf('road')]), r[0]).toBe(r[columns.indexOf('street')]);
   });
 
   it('stays a few kilobytes and a valid shard', () => {

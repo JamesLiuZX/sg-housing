@@ -1,6 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cacheClear, setCacheStorage } from './cache';
-import { blockFacts, blockResales, configureDataGov, PROPERTY_RESOURCE, RESALE_RESOURCE, summariseResales, toFacts } from './datagov';
+import {
+  blockFacts,
+  blockHeights,
+  blockResales,
+  buildingKind,
+  configureDataGov,
+  HEIGHT_FIELDS,
+  PROPERTY_RESOURCE,
+  RESALE_RESOURCE,
+  summariseResales,
+  toFacts,
+  toHeight
+} from './datagov';
 import { blocked, datastore, json, mockFetch, type Call } from './fetch.fixture';
 
 /** HDB Property Information's row for Blk 440A Clementi Ave 3, as served on 13 Nov 2026. */
@@ -208,5 +220,121 @@ describe('blockResales', () => {
   it('fails soft offline', async () => {
     mockFetch(blocked);
     expect(await blockResales('440A', 'CLEMENTI AVE 3')).toMatchObject({ status: 'unavailable', reason: 'network' });
+  });
+});
+
+/** A Property Information row trimmed to the columns heights are read from, with the uses named set to "Y". */
+const building = (blk_no: string, street: string, max_floor_lvl: string, ...uses: string[]): Record<string, string> => ({
+  blk_no,
+  street,
+  max_floor_lvl,
+  ...Object.fromEntries(HEIGHT_FIELDS.slice(3).map((c) => [c, uses.includes(c) ? 'Y' : 'N']))
+});
+
+/** Three of 440A's neighbours as data.gov.sg served them on 18 Nov 2026: a tower, a car park, a bus interchange podium. */
+const TOWER_440B = building('440B', 'CLEMENTI AVE 3', '40', 'residential');
+const CARPARK_440 = building('440', 'CLEMENTI AVE 3', '3', 'multistorey_carpark');
+const PODIUM_441 = building('441', "C'WEALTH AVE WEST", '7');
+
+/** The filters of a datastore search, lists and all. */
+const lists = (c: Call) => JSON.parse(c.url.searchParams.get('filters') ?? '{}') as Record<string, string | string[]>;
+
+describe('buildingKind', () => {
+  it.each([
+    [['residential'], 'residential'],
+    [['residential', 'commercial'], 'residential'],
+    [['residential', 'market_hawker'], 'residential'],
+    [['multistorey_carpark'], 'carpark'],
+    [['commercial', 'multistorey_carpark'], 'carpark'],
+    [['market_hawker', 'multistorey_carpark'], 'carpark'],
+    [['market_hawker'], 'market'],
+    [['commercial', 'market_hawker'], 'market'],
+    [['commercial'], 'commercial'],
+    [['precinct_pavilion'], 'pavilion'],
+    [[], 'other']
+  ])('calls a building flagged %j a %s', (uses, kind) => {
+    expect(buildingKind(building('1', 'ANY RD', '1', ...uses))).toBe(kind);
+  });
+});
+
+describe('toHeight', () => {
+  it('reads the storeys and the kind as HDB records them', () => {
+    expect(toHeight(TOWER_440B, '122440')).toEqual({ postal: '122440', blk: '440B', street: 'CLEMENTI AVE 3', storeys: 40, kind: 'residential' });
+    expect(toHeight(CARPARK_440, '120440')).toMatchObject({ storeys: 3, kind: 'carpark' });
+    expect(toHeight(PODIUM_441, '120441')).toMatchObject({ storeys: 7, kind: 'other' });
+  });
+
+  it('never draws a car park or a market as a tower, even when its record has no height', () => {
+    expect(toHeight(building('440', 'CLEMENTI AVE 3', '', 'multistorey_carpark'), 'x')).toMatchObject({ storeys: 5, kind: 'carpark' });
+    expect(toHeight(building('448', 'CLEMENTI AVE 3', '0', 'market_hawker'), 'x')).toMatchObject({ storeys: 1, kind: 'market' });
+    expect(toHeight(building('439', 'CLEMENTI AVE 3', 'n/a', 'precinct_pavilion'), 'x')).toMatchObject({ storeys: 1, kind: 'pavilion' });
+  });
+
+  it('leaves a block of flats without a believable height unknown, for the engine\'s typical block', () => {
+    expect(toHeight(building('1', 'ANY RD', '', 'residential'), 'x')).toBeNull();
+    expect(toHeight(building('1', 'ANY RD', '400', 'residential'), 'x')).toBeNull();
+  });
+
+  it('needs a block number and a street', () => {
+    expect(toHeight({ max_floor_lvl: '12', residential: 'Y' }, 'x')).toBeNull();
+  });
+});
+
+describe('blockHeights', () => {
+  const NEIGHBOURS = [
+    { postal: '122440', blk: '440B', street: 'CLEMENTI AVENUE 3' },
+    { postal: '120440', blk: '440', street: 'CLEMENTI AVENUE 3' },
+    { postal: '120441', blk: '441', street: 'COMMONWEALTH AVENUE WEST' }
+  ];
+
+  it('asks once for many blocks, in HDB\'s spelling, for only the columns it reads', async () => {
+    // Every number on every street comes back, so 441 on Clementi Ave 3 would too if it existed; it is not 441's street.
+    const decoy = building('441', 'CLEMENTI AVE 3', '12', 'residential');
+    const calls = mockFetch(() => datastore([decoy, TOWER_440B, PODIUM_441, CARPARK_440]));
+    const r = await blockHeights(NEIGHBOURS);
+    expect(calls).toHaveLength(1);
+    expect(resource(calls[0])).toBe(PROPERTY_RESOURCE);
+    expect(lists(calls[0])).toEqual({ blk_no: ['440B', '440', '441'], street: ['CLEMENTI AVE 3', "C'WEALTH AVE WEST"] });
+    expect(calls[0].url.searchParams.get('fields')).toBe(HEIGHT_FIELDS.join(','));
+    expect(r.map((x) => (x.status === 'ok' ? [x.data.postal, x.data.storeys, x.data.kind] : x.status))).toEqual([
+      ['122440', 40, 'residential'],
+      ['120440', 3, 'carpark'],
+      ['120441', 7, 'other']
+    ]);
+  });
+
+  it('looks again by number alone for a street HDB spells another way', async () => {
+    const calls = mockFetch((url) =>
+      datastore(url.searchParams.get('filters')?.includes('"street"') ? [] : [building('681', 'HOUGANG AVE 8', '11', 'residential'), building('681', 'RACE COURSE RD', '12', 'residential')])
+    );
+    const [r] = await blockHeights([{ postal: '210681', blk: '681', street: 'RACECOURSE ROAD' }]);
+    expect(r).toMatchObject({ status: 'ok', data: { street: 'RACE COURSE RD', storeys: 12 } });
+    expect(calls.map(lists)).toEqual([{ blk_no: ['681'], street: ['RACECOURSE RD'] }, { blk_no: ['681'] }]);
+  });
+
+  it('says "not found" for a block HDB does not have, and asks nothing about one with no street', async () => {
+    const calls = mockFetch(() => datastore([]));
+    const r = await blockHeights([
+      { postal: '000001', blk: '9999Z', street: 'NOWHERE ROAD' },
+      { postal: '000002', blk: '12', street: '' }
+    ]);
+    expect(r).toEqual([{ status: 'not-found' }, { status: 'not-found' }]);
+    expect(calls.map((c) => lists(c).blk_no)).toEqual([['9999Z'], ['9999Z']]);
+    expect(await blockHeights([])).toEqual([]);
+  });
+
+  it('fails soft offline, every answer "unavailable" and none rejected', async () => {
+    mockFetch(blocked);
+    const r = await blockHeights(NEIGHBOURS);
+    expect(r).toHaveLength(3);
+    for (const x of r) expect(x).toMatchObject({ status: 'unavailable', service: 'datagov', reason: 'network' });
+  });
+
+  it('stops when its caller gives up', async () => {
+    const calls = mockFetch(() => datastore([TOWER_440B]));
+    const ctl = new AbortController();
+    ctl.abort();
+    expect(await blockHeights(NEIGHBOURS, { signal: ctl.signal })).toEqual([{ status: 'aborted' }, { status: 'aborted' }, { status: 'aborted' }]);
+    expect(calls).toHaveLength(0);
   });
 });

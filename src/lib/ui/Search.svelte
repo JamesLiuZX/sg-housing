@@ -1,13 +1,17 @@
 <script lang="ts">
   import { searchAddress, type AddressHit } from '../data';
+  import { hdbCandidates, placeName } from './candidates';
   import { roadName, searchTrouble } from './place';
 
   /**
    * The way in: one field for a block or a postal code, and what OneMap finds
    * as you type. What is typed goes to OneMap and nowhere else, and is not
-   * kept. Every answer gets its own plain sentence: nothing yet, searching,
-   * no HDB block, or OneMap not answering, which names OneMap and points to
-   * the bundled block that works without it.
+   * kept. Only HDB blocks are offered: every address OneMap finds is checked
+   * against HDB's own list of blocks first, so a condo or a house is never
+   * listed only to be turned away once picked. Every answer gets its own
+   * plain sentence: nothing yet, searching, not an HDB block, or OneMap not
+   * answering, which names OneMap and points to the bundled block that works
+   * without it.
    *
    * A combobox: arrows move through the blocks, Enter takes one, Escape
    * clears. On a phone the list opens upward, clear of the keyboard.
@@ -35,9 +39,12 @@
 
   type Answer =
     | { kind: 'idle' }
-    | { kind: 'hits'; hits: AddressHit[]; more: boolean }
+    /** `others`: how many addresses found were not HDB blocks, and are left out. */
+    | { kind: 'hits'; hits: AddressHit[]; more: boolean; others: number }
     /** OneMap answered and nothing was a block. `places`: it matched roads or landmarks. */
     | { kind: 'none'; query: string; places: boolean }
+    /** OneMap found addresses, and HDB's list of blocks has none of them: condos, houses, offices. */
+    | { kind: 'not-hdb'; query: string; places: AddressHit[] }
     | { kind: 'down'; why: string };
 
   let query = $state('');
@@ -80,13 +87,17 @@
     busy = true;
     const r = await searchAddress(q, { signal: c.signal });
     if (c.signal.aborted || r.status === 'aborted') return;
-    busy = false;
     if (r.status === 'ok') {
-      // Roads and landmarks have no block number: nothing for HDB to know about.
-      const blocks = r.data.hits.filter((h) => h.blk !== '' && h.road !== '');
+      // Roads and landmarks have no block number: nothing for HDB to know about. The rest go to the block index.
+      const addresses = r.data.hits.filter((h) => h.blk !== '' && h.road !== '');
+      const sorted = await hdbCandidates(addresses, { signal: c.signal });
+      if (!sorted) return;
+      const { blocks, others } = sorted;
       answer = blocks.length
-        ? { kind: 'hits', hits: blocks.slice(0, MAX), more: blocks.length > MAX || r.data.total > r.data.hits.length }
-        : { kind: 'none', query: q, places: true };
+        ? { kind: 'hits', hits: blocks.slice(0, MAX), more: blocks.length > MAX || r.data.total > r.data.hits.length, others: others.length }
+        : others.length
+          ? { kind: 'not-hdb', query: q, places: others }
+          : { kind: 'none', query: q, places: true };
     } else if (r.status === 'not-found') {
       answer = { kind: 'none', query: q, places: false };
     } else if (r.status === 'unavailable') {
@@ -94,6 +105,7 @@
     } else {
       answer = { kind: 'idle' };
     }
+    busy = false;
     if (takeFirst && answer.kind === 'hits') take(answer.hits[0]);
     takeFirst = false;
   }
@@ -144,6 +156,16 @@
       return answer.places
         ? { text: 'That is a road or a place, not a block. Add the block number, like 440A Clementi Ave 3.', tone: 'warn' }
         : { text: `No HDB block found for “${answer.query}”. Try a block and street, or a six-digit postal code.`, tone: 'warn' };
+    }
+    if (answer.kind === 'not-hdb') {
+      const [one] = answer.places;
+      return {
+        text:
+          answer.places.length === 1
+            ? `${placeName(one)} is not an HDB block. Blk covers HDB flats only.`
+            : `None of the places found for “${answer.query}” is an HDB block. Blk covers HDB flats only.`,
+        tone: 'warn'
+      };
     }
     if (answer.kind === 'down') return { text: `${answer.why} The block below works without it.`, tone: 'warn' };
     if (trouble) return { text: trouble, tone: 'warn' };
@@ -207,8 +229,11 @@
         {#if hit.postal}<span class="postal num">{hit.postal}</span>{/if}
       </li>
     {/each}
-    {#if answer.kind === 'hits' && answer.more}
-      <li class="more" role="presentation">More places match. Add the street to narrow it down.</li>
+    {#if answer.kind === 'hits' && (answer.more || answer.others)}
+      <li class="more" role="presentation">
+        {#if answer.others}Only HDB blocks are listed.{/if}
+        {#if answer.more}More places match. Add the street to narrow it down.{/if}
+      </li>
     {/if}
   </ul>
 

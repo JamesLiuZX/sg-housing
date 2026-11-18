@@ -123,15 +123,16 @@
 </script>
 
 <div class="hud">
-  <div class="corner" data-avoid in:fly={{ y: -10, duration: ms(420), delay: ms(600) }} out:fade={{ duration: ms(160) }}>
-    <button class="out glass" onclick={onexit}>
+  <div class="corner" data-avoid>
+    <button class="out glass" onclick={onexit} in:fly={{ y: -10, duration: ms(420), delay: ms(600) }} out:fade={{ duration: ms(160) }}>
       <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
         <path d="M9 2.4 15 5.7v6.6L9 15.6l-6-3.3V5.7L9 2.4Z" />
         <path d="M3 5.7 9 9l6-3.3M9 9v6.6" />
       </svg>
       Overview
     </button>
-    <p class="disclose">Computer-generated model, not a photograph</p>
+    <!-- The standing disclosure takes over at once from the one the overview had; only the way out waits for the flight. -->
+    <p class="disclose" in:fade={{ duration: ms(200) }} out:fade={{ duration: ms(160) }}>Computer-generated model, not a photograph</p>
   </div>
 
   <figure class="map glass" data-avoid aria-label={room ? `Plan of the flat. You are in ${where}.` : 'Plan of the flat'} in:fly={{ y: -10, duration: ms(420), delay: ms(680) }} out:fade={{ duration: ms(160) }}>

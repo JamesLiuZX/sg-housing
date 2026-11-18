@@ -14,11 +14,14 @@ export function ok<T>(r: Result<T> | null | undefined): T | null {
   return r && r.status === 'ok' ? r.data : null;
 }
 
+/** "THE CLEMENT CANOPY" as a name is written: "The Clement Canopy". */
+export function titleCase(s: string): string {
+  return s.toLowerCase().replace(/(^|[\s\-/(])([a-z])/g, (_, before: string, c: string) => before + c.toUpperCase());
+}
+
 /** "CLEMENTI AVENUE 3" as it reads on an envelope: "Clementi Ave 3". HDB's abbreviations, title case. */
 export function roadName(road: string): string {
-  return hdbStreet(road)
-    .toLowerCase()
-    .replace(/(^|[\s\-/(])([a-z])/g, (_, before: string, c: string) => before + c.toUpperCase());
+  return titleCase(hdbStreet(road));
 }
 
 /** Storeys as unit numbers write them: #07, #25. */
