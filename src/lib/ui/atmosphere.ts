@@ -7,26 +7,15 @@
  * straight to the DOM and stays out of reactive state.
  */
 
-type RGB = readonly [number, number, number];
+import { mixRGB as mix, skyStops, type RGB } from '../engine/sky';
 
 const hex = (h: string): RGB => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
-const mix = (a: RGB, b: RGB, t: number): RGB => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
 const triplet = (c: RGB) => `${Math.round(c[0])} ${Math.round(c[1])} ${Math.round(c[2])}`;
 const toHex = (c: RGB) => '#' + c.map((v) => Math.round(v).toString(16).padStart(2, '0')).join('');
 const smooth = (t: number) => {
   const k = Math.min(1, Math.max(0, t));
   return k * k * (3 - 2 * k);
 };
-
-/** Three stops of a soft vignette: centre, body, edge. */
-type Sky = readonly [RGB, RGB, RGB];
-const sky = (a: string, b: string, c: string): Sky => [hex(a), hex(b), hex(c)];
-
-const DAY = sky('#faf7f1', '#f1ede5', '#e3ddd0');
-const GOLD = sky('#fce8d2', '#f5d2b1', '#e8b48e');
-/** The few minutes around sunset. Without this stop, peach fades to ink through a muddy grey. */
-const DUSK = sky('#a08078', '#84696b', '#5f4d58');
-const NIGHT = sky('#1c2132', '#12151f', '#0a0c13');
 
 const INK_DAY = hex('#1e1f22');
 const INK_NIGHT = hex('#ece7dc');
@@ -58,11 +47,7 @@ export class Atmosphere {
 
   /** day: 0 night to 1 full daylight. gold: 1 at the horizon, 0 with the sun high. */
   set(day: number, gold: number): void {
-    const warm = Math.pow(Math.min(1, Math.max(0, gold)), 1.6);
-    const stops = [0, 1, 2].map((i) => {
-      const lit = mix(DAY[i], GOLD[i], warm);
-      return day >= 0.5 ? mix(DUSK[i], lit, smooth((day - 0.5) * 2)) : mix(NIGHT[i], DUSK[i], smooth(day * 2));
-    });
+    const stops = skyStops(day, gold);
     const key = stops.map(toHex).join();
     if (key !== this.lastSky) {
       this.lastSky = key;

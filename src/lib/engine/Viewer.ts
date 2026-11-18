@@ -12,6 +12,7 @@ import { PAL, col, cutTop, installToneMapping, makeUniforms, type Uniforms } fro
 import { Nav, type P2 } from './nav';
 import { placeSite, type Unit } from './placement';
 import { GROUND, STOREY, buildSite, floorY, storeyAt, type BlockSite, type SiteModel } from './site';
+import { skyStops } from './sky';
 import { Tweens, clamp, ease, lerp, smooth } from './tween';
 
 export type { BlockSite } from './site';
@@ -69,6 +70,8 @@ const PUSH_TIME = 3.6;
 const SITE_SOFT = 0.45;
 /** How far round from the facade's normal the push-in arrives, so the dollhouse is seen three-quarter on. */
 const ARRIVE_TURN = 0.5;
+/** The sun on the site against the sun in the flat: the blocks are white card far from the camera, and would bleach. */
+const SITE_SUN = 0.45;
 
 /** The two ends of the push-in: the block view and the dollhouse view, each as an orbit about a target. */
 interface PushPlan {
@@ -189,6 +192,7 @@ export class Viewer {
   private scrub: IntroPlan | null = null;
   /** Sun direction the light field's bounce was last spread for. */
   private bounceDir = new THREE.Vector3(0, -1, 0);
+  private fogColour = new THREE.Color();
 
   private compass = new THREE.Group();
   private compassMats: { mat: THREE.Material & { opacity: number }; base: number }[] = [];
@@ -925,15 +929,18 @@ export class Viewer {
     t.uCast.value = 0.17 * smooth(2 * DEG, 24 * DEG, altitude) * g * this.tableGain;
     t.uContact.value = lerp(0.12, 0.26, day) * this.tableGain;
 
-    // The site's table takes the blocks' shadows at full length, since late sun is the point of
-    // the block stage; its windows light up with the flat's lamps, and the neighbours stand
-    // back in a little of the sky's own light.
+    // The site is a model under one low lamp: its shade deeper and cooler than a room's, its sunlit
+    // faces held short of white so they keep the sun's colour, its windows lit with the flat's lamps,
+    // and the far blocks hazed toward the page so the chosen one stands forward.
     if (this.site) {
       const su = this.site.u;
-      su.uCast.value = 0.3 * smooth(-1 * DEG, 5 * DEG, altitude) * g;
-      su.uContact.value = lerp(0.18, 0.3, day);
+      su.uContact.value = lerp(0.16, 0.3, day);
       su.uNight.value = lamps;
-      su.uHaze.value.copy(this.hemi.groundColor).multiplyScalar(lerp(0.04, 0.17, day));
+      su.uSunK.value = SITE_SUN;
+      su.uShade.value.setRGB(lerp(0.95, 0.52, day), lerp(0.95, 0.57, day), lerp(1, 0.7, day));
+      const body = skyStops(day, gold)[1];
+      const fog = this.fogColour.setRGB(body[0] / 255, body[1] / 255, body[2] / 255, THREE.SRGBColorSpace);
+      su.uFog.value.set(fog.r, fog.g, fog.b, 0.6);
     }
 
     this.placeSunMarker();
@@ -1587,7 +1594,7 @@ export class Viewer {
   private blockAngles(): { theta: number; phi: number } {
     const d = this.sunDir();
     const sun = Math.atan2(d.x, d.z);
-    const phi = this.portrait ? 1.02 : 0.98;
+    const phi = this.portrait ? 1.08 : 1.04;
     return { theta: this.clearView([sun + 1.15, sun - 1.15], phi, Math.PI, []), phi };
   }
 
@@ -1655,7 +1662,7 @@ export class Viewer {
   private blockFraming(theta: number, phi: number): { d: number; target: THREE.Vector3 } {
     const b = this.site!.box;
     const base = new THREE.Vector3((b.min.x + b.max.x) / 2, b.max.y * 0.42, (b.min.z + b.max.z) / 2).applyMatrix4(this.siteMatrix);
-    return this.framing(theta, phi, this.blockCorners(), base, false, 0.62);
+    return this.framing(theta, phi, this.blockCorners(), base, false, 0.74);
   }
 
   /** The block framed afresh for new insets, at the angle the person left it, easing there. */

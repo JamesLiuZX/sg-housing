@@ -26,6 +26,12 @@ export const STOREY = 2.8;
 const PARAPET = 1.1;
 /** Storeys given to a neighbour whose height nobody has told us: a typical older slab block. */
 const NEIGHBOUR_STOREYS = 12;
+/** The chosen block's card: warm and bright, the subject. sRGB. */
+const CARD = 0xfff8ec;
+/** The neighbours' card: cooler and greyer, so they step back. */
+const CONTEXT = 0xe2e4e5;
+/** The site plate, a shade under the page so a sunlit patch of it still reads as ground. */
+const PLATE = 0xefece6;
 
 /** What the block stage is asked to show. */
 export interface BlockSite {
@@ -66,12 +72,28 @@ export interface SiteUniforms {
   uNight: THREE.IUniform<number>;
   uMark: THREE.IUniform<THREE.Color>;
   uGlow: THREE.IUniform<THREE.Color>;
-  /** Added to the neighbours so they step back behind the chosen block. */
-  uHaze: THREE.IUniform<THREE.Color>;
-  /** The table: strength of the sun's shadow, of the contact shade, and of the whole table. */
-  uCast: THREE.IUniform<number>;
+  /** The table: strength of the contact shade, and of the whole table. */
   uContact: THREE.IUniform<number>;
   uGround: THREE.IUniform<number>;
+  /**
+   * The site's own exposure, against the lights it shares with the flat:
+   * the sky's light scaled per channel, so the shade on a block is deeper and
+   * cooler than the shade in a room, and the sun's light scaled, so a sunlit
+   * face keeps its warmth instead of bleaching to white.
+   */
+  uShade: THREE.IUniform<THREE.Color>;
+  uSunK: THREE.IUniform<number>;
+  /**
+   * Haze toward the page: its colour (rgb, linear, after tone mapping) and
+   * strength (a), growing with distance from uFogAt (site frame) between
+   * uFogRange.x and .y metres.
+   */
+  uFog: THREE.IUniform<THREE.Vector4>;
+  uFogAt: THREE.IUniform<THREE.Vector3>;
+  uFogRange: THREE.IUniform<THREE.Vector2>;
+  /** A box in the world inside which the chosen block is not drawn: round the flat, seen from inside it. Empty while min > max. */
+  uHideMin: THREE.IUniform<THREE.Vector3>;
+  uHideMax: THREE.IUniform<THREE.Vector3>;
 }
 
 export interface BlockHit {
@@ -124,93 +146,160 @@ uniform float uSplit;
 uniform vec3 uMove;
 varying vec4 vInfo;
 varying vec3 vSite;
+varying vec3 vBlkWorld;
 varying float vLow;
 `;
 
 // aInfo: x the storey (chosen block, from 1) or -1 (a neighbour); y metres along the wall; z the wall's
-// length; w the kind (0 wall, 1 roof or section, 2 parapet, 3 lift core) plus a per-wall seed below 1.
+// length; w the kind (0 wall, 1 roof or section, 2 parapet, 3 lift core, 4 a blank wall that carries
+// the painted number) plus a per-wall seed below 1.
 const VERT_BODY = /* glsl */ `
 vInfo = aInfo;
 vSite = transformed;
 transformed.y += aInfo.x > 0.5 ? (aInfo.x > uSplit - 0.5 ? uMove.x : -uMove.y) : -uMove.z;
 vLow = transformed.y;
+vBlkWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;
 `;
 
-const FRAG_HEAD = /* glsl */ `
+/** What every surface of the site reads: its exposure, the haze, the hole round a flat seen from inside. */
+const FRAG_SHARED = /* glsl */ `
+uniform vec3 uShade;
+uniform float uSunK;
+uniform vec4 uFog;
+uniform vec3 uFogAt;
+uniform vec2 uFogRange;
+uniform vec3 uHideMin;
+uniform vec3 uHideMax;
+varying vec3 vSite;
+varying vec3 vBlkWorld;
+// Light kept off the neighbours' sunlit faces and given to their shade, so they read flatter than the chosen block.
+float blkDirect = 1.0;
+float blkSky = 1.0;
+`;
+
+const FRAG_HEAD =
+  FRAG_SHARED +
+  /* glsl */ `
 uniform vec2 uBand;
 uniform float uBandOn;
 uniform float uNight;
 uniform vec3 uMark;
 uniform vec3 uGlow;
-uniform vec3 uHaze;
+uniform vec3 uCard;
+uniform vec3 uContext;
+uniform float uRoof;
 varying vec4 vInfo;
-varying vec3 vSite;
 varying float vLow;
 float blkHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 `;
 
+/** Pieces sinking into the table are cut off at its surface, and the chosen block steps aside for a flat seen from inside. */
+const FRAG_CLIP = /* glsl */ `
+if (vLow < -0.02) discard;
+if (vInfo.x > 0.5 && all(greaterThan(vBlkWorld, uHideMin)) && all(lessThan(vBlkWorld, uHideMax))) discard;
+`;
+
+const G = GROUND.toFixed(2);
+const S = STOREY.toFixed(2);
+const P = PARAPET.toFixed(2);
+
 /**
- * The block's face, drawn rather than modelled: slab edges at true storey
- * height, a band of windows on every storey, the void deck's shade between
- * its columns, and the marked storey in the sun's orange. Lines are about a
- * pixel wide at any distance and fade out before they could crowd into a
- * grey, so the far blocks stay quiet.
+ * The block's face, drawn rather than modelled. The chosen block is warm
+ * card with slab edges in graphite at true storey height, a band of windows
+ * on every storey broken into bays, a void deck open and in its own shade
+ * between columns, a coping line round the roof, and the marked storey in
+ * the sun's orange. Its neighbours are cooler, plainer card that only light
+ * their windows after dark. Every line is about a pixel wide at any distance,
+ * and every pattern gives way to its average before it could shimmer.
  */
 const FRAG_COLOR = /* glsl */ `
-// Pieces sinking into the table are cut off at its surface.
-if (vLow < -0.02) discard;
+${FRAG_CLIP}
 float blkKind = floor(vInfo.w + 0.001);
 float blkSeed = fract(vInfo.w + 0.001);
 bool blkMain = vInfo.x > 0.5;
 float blkY = vSite.y;
 float blkPx = max(fwidth(blkY), 1e-4);
-vec3 blkC = diffuseColor.rgb;
-if (blkKind < 0.5) {
-  float st = blkMain ? vInfo.x : (blkY < ${GROUND.toFixed(1)} ? 1.0 : 2.0 + floor((blkY - ${GROUND.toFixed(1)}) / ${STOREY.toFixed(1)}));
-  float h = blkY - (st < 1.5 ? 0.0 : ${GROUND.toFixed(1)} + (st - 2.0) * ${STOREY.toFixed(1)});
+const vec3 blkInk = vec3(0.046, 0.05, 0.058);
+vec3 blkC = blkMain ? uCard : uContext;
+if (!blkMain) {
+  blkDirect = 0.78;
+  blkSky = 1.22;
+}
+if (blkKind < 0.5 || blkKind > 3.5) {
+  bool blank = blkKind > 3.5;
+  float st = blkMain ? vInfo.x : (blkY < ${G} ? 1.0 : 2.0 + floor((blkY - ${G}) / ${S}));
+  float h = blkY - (st < 1.5 ? 0.0 : ${G} + (st - 2.0) * ${S});
   float u = vInfo.y;
   float len = vInfo.z;
-  float lvl = ${GROUND.toFixed(1)} + max(0.0, floor((blkY - ${GROUND.toFixed(1)}) / ${STOREY.toFixed(1)} + 0.5)) * ${STOREY.toFixed(1)};
-  float line = (1.0 - smoothstep(0.3 * blkPx, 1.3 * blkPx, abs(blkY - lvl))) * (1.0 - smoothstep(0.22, 0.6, blkPx));
-  float win = 0.0;
+  float lvl = ${G} + max(0.0, floor((blkY - ${G}) / ${S} + 0.5)) * ${S};
+  float line = (1.0 - smoothstep(0.35 * blkPx, 1.35 * blkPx, abs(blkY - lvl))) * (1.0 - smoothstep(blkMain ? 0.3 : 0.16, blkMain ? 0.8 : 0.4, blkPx));
+  // Windows: a band on every storey, in bays about 3.3 m apart with piers between.
+  float bays = max(1.0, floor(len / 3.3 + 0.5));
+  float bay = len / bays;
+  float fx = fract(u / bay);
+  float pu = max(fwidth(u) / bay, 1e-4);
+  float wx = smoothstep(0.17 - pu, 0.17 + pu, fx) * (1.0 - smoothstep(0.83 - pu, 0.83 + pu, fx));
+  wx = mix(wx, 0.66, smoothstep(0.08, 0.3, pu));
+  float wy = smoothstep(0.85, 0.85 + blkPx, h) * (1.0 - smoothstep(2.2 - blkPx, 2.2, h));
+  wy = mix(wy, 0.48, smoothstep(0.3, 0.8, blkPx));
+  float win = st > 1.5 && len > 1.6 && !blank ? wx * wy : 0.0;
   float deck = 0.0;
-  if (blkMain && st > 1.5) {
-    float along = step(1.6, len) * smoothstep(0.35, 0.35 + blkPx, u) * (1.0 - smoothstep(len - 0.35 - blkPx, len - 0.35, u));
-    win = along * smoothstep(0.9, 0.9 + blkPx, h) * (1.0 - smoothstep(2.15 - blkPx, 2.15, h));
-  } else if (blkMain) {
-    float column = max(step(u, 0.55), step(len - 0.55, u));
-    if (len > 8.0) column = max(column, step(fract(u / 6.5 + 0.5), 0.09));
-    deck = (1.0 - column) * (1.0 - smoothstep(3.05, 3.05 + blkPx, h));
+  if (blkMain && st < 1.5) {
+    float column = max(step(u, 0.6), step(len - 0.6, u));
+    if (len > 8.0) column = max(column, step(fract(u / 6.5 + 0.5), 0.1));
+    deck = (1.0 - column) * (1.0 - smoothstep(3.0, 3.0 + blkPx, h));
   }
-  blkC = mix(blkC, vec3(0.42, 0.5, 0.56), 0.3 * win);
-  blkC *= 1.0 - 0.52 * deck;
-  blkC = mix(blkC, vec3(0.046, 0.05, 0.058), (blkMain ? 0.36 : 0.15) * line);
-  // At night some windows are lit, each its own warmth, and void decks keep their lights on.
-  float r = blkHash(vec2(st + blkSeed * 37.0, floor(u / 2.6) + blkSeed * 91.0));
-  totalEmissiveRadiance += uGlow * uNight * (win * step(0.52, r) * (0.5 + 0.5 * fract(r * 13.7)) + 0.3 * deck);
+  if (blkMain) {
+    blkC = mix(blkC, vec3(0.13, 0.17, 0.22), 0.5 * win);
+    // The void deck is open: its shade, between columns, reads as a way through.
+    blkC = mix(blkC, vec3(0.055, 0.052, 0.05), 0.82 * deck);
+  }
+  blkC = mix(blkC, blkInk, (blkMain ? 0.52 : 0.14) * line);
+  // After dark, about half the windows are lit, each its own warmth; neighbours fewer and fainter, void decks all night.
+  float r = blkHash(vec2(st + blkSeed * 37.0, floor(u / bay) + blkSeed * 91.0));
+  float lit = step(blkMain ? 0.45 : 0.6, r) * (0.55 + 0.45 * fract(r * 13.7));
+  float wn = st > 1.5 && len > 1.6 && !blank ? wx * wy : 0.0;
+  totalEmissiveRadiance += uGlow * uNight * ((blkMain ? 1.0 : 0.32) * wn * lit + 0.4 * deck);
   if (blkMain) {
     float inBand = smoothstep(uBand.x - blkPx, uBand.x, blkY) * (1.0 - smoothstep(uBand.y, uBand.y + blkPx, blkY));
-    float rim = 1.0 - smoothstep(0.7 * blkPx, 1.8 * blkPx, min(abs(blkY - uBand.x), abs(blkY - uBand.y)));
-    blkC = mix(blkC, uMark, 0.6 * uBandOn * inBand);
-    blkC = mix(blkC, uMark * 0.45, 0.85 * uBandOn * rim);
-    totalEmissiveRadiance += uMark * uBandOn * inBand * (0.08 + 0.45 * uNight);
+    float rim = 1.0 - smoothstep(0.6 * blkPx, 1.7 * blkPx, min(abs(blkY - uBand.x), abs(blkY - uBand.y)));
+    blkC = mix(blkC, uMark * (1.0 - 0.22 * win), 0.78 * uBandOn * inBand);
+    blkC = mix(blkC, uMark * 0.35, 0.9 * uBandOn * rim);
+    totalEmissiveRadiance += uMark * uBandOn * inBand * (0.14 + 0.45 * uNight);
   }
 } else if (blkKind < 1.5) {
-  blkC *= 0.94;
+  blkC *= blkMain ? 0.93 : 0.96;
+} else if (blkKind < 2.5) {
+  // The parapet: a slab edge at the roof and a crisp coping along its top.
+  float hp = blkY - uRoof;
+  float edge = max(1.0 - smoothstep(0.4 * blkPx, 1.5 * blkPx, abs(hp)), 1.0 - smoothstep(0.0, 1.6 * blkPx, ${P} - hp));
+  blkC = mix(blkC * mix(1.0, 0.9, smoothstep(${P} - 0.25 - blkPx, ${P} - 0.25, hp)), blkInk, 0.6 * edge);
 }
-if (!blkMain) totalEmissiveRadiance += uHaze;
 diffuseColor.rgb = blkC;
 `;
 
-function siteShade<T extends THREE.Material>(mat: T, u: SiteUniforms, key: string, pattern: boolean): T {
+/** Haze, after tone mapping so it lands on the page's own colour. */
+const FRAG_FOG = /* glsl */ `
+gl_FragColor.rgb = mix(gl_FragColor.rgb, uFog.rgb, uFog.a * smoothstep(uFogRange.x, uFogRange.y, distance(vSite.xz, uFogAt.xz)));
+`;
+
+/** The site's lighting and haze, on any Lambert shader. */
+function siteLight(fs: string): string {
+  return fs
+    .replace('#include <shadowmap_pars_fragment>', softShadowChunk())
+    .replace('#include <lights_fragment_maps>', '#include <lights_fragment_maps>\nirradiance *= uShade * blkSky;')
+    .replace('#include <lights_fragment_end>', '#include <lights_fragment_end>\nreflectedLight.directDiffuse *= uSunK * blkDirect;')
+    .replace('#include <tonemapping_fragment>', '#include <tonemapping_fragment>\n' + FRAG_FOG);
+}
+
+function siteShade<T extends THREE.Material>(mat: T, u: SiteUniforms, extra: Record<string, THREE.IUniform>, key: string, pattern: boolean): T {
   mat.onBeforeCompile = (s) => {
-    Object.assign(s.uniforms, u);
+    Object.assign(s.uniforms, u, extra);
     s.vertexShader = VERT_HEAD + s.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\n' + VERT_BODY);
-    let fs = FRAG_HEAD + s.fragmentShader.replace('#include <shadowmap_pars_fragment>', softShadowChunk());
-    fs = pattern
-      ? fs.replace('#include <color_fragment>', '#include <color_fragment>\n' + FRAG_COLOR)
-      : fs.replace('#include <color_fragment>', '#include <color_fragment>\nif (vLow < -0.02) discard;\n');
-    s.fragmentShader = fs;
+    s.fragmentShader = siteLight(FRAG_HEAD + s.fragmentShader).replace(
+      '#include <color_fragment>',
+      '#include <color_fragment>\n' + (pattern ? FRAG_COLOR : FRAG_CLIP)
+    );
   };
   mat.customProgramCacheKey = () => key;
   return mat;
@@ -230,37 +319,36 @@ function siteDepth(u: SiteUniforms): THREE.MeshDepthMaterial {
 }
 
 /**
- * The table under the site: it draws only shade, the sun's shadows and a soft
- * contact shadow round every block, over the page itself, and fades out at
- * its rim the way the flat's table does.
+ * The plate the site stands on: card a shade darker than the page, lit like
+ * the blocks, so the sun's long shadows have something to fall across, with a
+ * soft contact shade round every footprint. It fades into the page well
+ * before its edge, the way a model's base dissolves into a photographer's
+ * sweep.
  */
-function groundMaterial(u: SiteUniforms, ao: THREE.Texture, rect: THREE.Vector4, radius: number): THREE.ShadowMaterial {
-  const mat = new THREE.ShadowMaterial({ color: 0x2a2218, opacity: 1, depthWrite: false });
+function groundMaterial(u: SiteUniforms, ao: THREE.Texture, rect: THREE.Vector4, radius: number): THREE.MeshLambertMaterial {
+  const mat = new THREE.MeshLambertMaterial({ color: PLATE, transparent: true, depthWrite: false });
   mat.onBeforeCompile = (s) => {
-    Object.assign(s.uniforms, {
+    Object.assign(s.uniforms, u, {
       uAo: { value: ao },
       uAoRect: { value: rect },
-      uRim: { value: new THREE.Vector2(radius * 0.55, radius) },
-      uCast: u.uCast,
-      uContact: u.uContact,
-      uGround: u.uGround
+      uRim: { value: new THREE.Vector2(radius * 0.32, radius * 0.92) }
     });
-    s.vertexShader = 'varying vec2 vGround;\n' + s.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\nvGround = position.xz;');
-    s.fragmentShader =
-      'uniform sampler2D uAo;\nuniform vec4 uAoRect;\nuniform vec2 uRim;\nuniform float uCast;\nuniform float uContact;\nuniform float uGround;\nvarying vec2 vGround;\n' +
-      s.fragmentShader
-        .replace('#include <shadowmap_pars_fragment>', softShadowChunk())
-        .replace(
-          'gl_FragColor = vec4( color, opacity * ( 1.0 - getShadowMask() ) );',
-          /* glsl */ `
-float blkCast = uCast * (1.0 - getShadowMask());
-float blkAo = uContact * texture2D(uAo, (vGround - uAoRect.xy) / uAoRect.zw).r;
-float blkRim = 1.0 - smoothstep(uRim.x, uRim.y, length(vGround));
-gl_FragColor = vec4(color, (1.0 - (1.0 - blkCast) * (1.0 - blkAo)) * blkRim * uGround);
+    s.vertexShader =
+      'varying vec3 vSite;\nvarying vec3 vBlkWorld;\n' +
+      s.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\nvSite = transformed;\nvBlkWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;');
+    s.fragmentShader = siteLight(
+      FRAG_SHARED +
+        'uniform sampler2D uAo;\nuniform vec4 uAoRect;\nuniform vec2 uRim;\nuniform float uContact;\nuniform float uGround;\n' +
+        s.fragmentShader
+    ).replace(
+      '#include <color_fragment>',
+      /* glsl */ `#include <color_fragment>
+diffuseColor.rgb *= 1.0 - uContact * texture2D(uAo, (vSite.xz - uAoRect.xy) / uAoRect.zw).r;
+diffuseColor.a *= (1.0 - smoothstep(uRim.x, uRim.y, length(vSite.xz))) * uGround;
 `
-        );
+    );
   };
-  mat.customProgramCacheKey = () => 'blk-site-ground';
+  mat.customProgramCacheKey = () => 'blk-site-plate';
   return mat;
 }
 
@@ -410,26 +498,60 @@ function neighbourStoreys(n: Neighbour, spec: BlockSite): number {
   return lettered(n.blk) && lettered(spec.block.blk) && stem(n.blk) === stem(spec.block.blk) ? spec.storeys : NEIGHBOUR_STOREYS;
 }
 
-/** The block number as it is painted: tall condensed figures in graphite, on a transparent card. */
-function paintNumber(label: string): { canvas: HTMLCanvasElement; aspect: number; redraw: () => void } {
+/** Font size the number is painted at on its canvas, px. Condensed figures stand about seven tenths of it. */
+const FIG = 160;
+const FIG_CAP = FIG * 0.7;
+const FIG_PAD = 22;
+
+/**
+ * The block number as it is painted, in graphite on a transparent card:
+ * across the wall, or one figure under another down a narrow end wall, as
+ * on the tall point blocks. `cells` are the texture rectangles (u0, v0, u1,
+ * v1) of each piece to place, top first, all FIG_CAP pixels to a figure's height.
+ */
+function paintNumber(label: string, vertical: boolean): { canvas: HTMLCanvasElement; cells: [number, number, number, number][]; cellW: number; cellH: number; redraw: () => void } {
   const canvas = document.createElement('canvas');
-  const font = '700 150px "Barlow Condensed", "Arial Narrow", sans-serif';
+  const font = `700 ${FIG}px "Barlow Condensed", "Arial Narrow", sans-serif`;
   const g = canvas.getContext('2d')!;
   g.font = font;
-  const width = Math.ceil(Math.min(900, g.measureText(label).width * 1.08 + 30));
-  canvas.width = width;
-  canvas.height = 150;
+  const chars = vertical ? [...label] : [label];
+  const cellW = Math.ceil(vertical ? FIG * 0.6 + FIG_PAD * 2 : Math.min(1400, g.measureText(label).width * 1.06 + FIG_PAD * 2));
+  const cellH = Math.ceil(FIG_CAP + FIG_PAD * 2);
+  canvas.width = cellW;
+  canvas.height = cellH * chars.length;
   const redraw = () => {
     g.clearRect(0, 0, canvas.width, canvas.height);
     g.font = font;
     g.textAlign = 'center';
     g.textBaseline = 'alphabetic';
-    g.fillStyle = '#3d3f44';
-    // Figures sit on the baseline; condensed caps are about seven tenths of the size.
-    g.fillText(label, width / 2, 128, width - 20);
+    g.fillStyle = '#34363b';
+    chars.forEach((c, i) => g.fillText(c, cellW / 2, i * cellH + FIG_PAD + FIG_CAP, cellW - FIG_PAD));
   };
   redraw();
-  return { canvas, aspect: width / canvas.height, redraw };
+  // The canvas is flipped on upload, so its top row is v = 1.
+  const cells = chars.map((_, i): [number, number, number, number] => [0, 1 - ((i + 1) * cellH) / canvas.height, 1, 1 - (i * cellH) / canvas.height]);
+  return { canvas, cells, cellW, cellH, redraw };
+}
+
+let measure: CanvasRenderingContext2D | null = null;
+
+/**
+ * The height of a figure, metres, for the number set on a wall `len` metres
+ * wide on a block whose roof is at `top`: across the wall, or stacked.
+ */
+function figureHeight(label: string, len: number, top: number, vertical: boolean): number {
+  const n = [...label].length;
+  if (vertical) return Math.min(len * 1.02, 3.6, (top * 0.42) / (n * 1.4));
+  measure ??= document.createElement('canvas').getContext('2d')!;
+  measure.font = `700 ${FIG}px "Barlow Condensed", "Arial Narrow", sans-serif`;
+  // The number's width in figure heights.
+  const across = Math.max(0.5, measure.measureText(label).width / FIG_CAP);
+  return Math.min((len * 0.8) / across, 4.2, top * 0.08);
+}
+
+/** A broad end wall takes the number across it; a narrow one, one figure under another, where each can stand far taller. */
+function numberStacks(label: string, len: number, top: number): boolean {
+  return [...label].length > 1 && figureHeight(label, len, top, true) > 1.35 * figureHeight(label, len, top, false);
 }
 
 /**
@@ -441,43 +563,49 @@ function numberWalls(parts: Part[], list: Facade[]): { a: XY; b: XY; len: number
   const [ax, ay] = principal(outer);
   const out: { a: XY; b: XY; len: number }[] = [];
   for (const sign of [1, -1]) {
-    let best: Facade | null = null;
-    let score = -Infinity;
-    for (const f of list) {
-      if (f.part !== 0 || f.ring !== 0 || f.length < 4.5) continue;
-      const nx = Math.sin((f.bearing * Math.PI) / 180);
-      const ny = Math.cos((f.bearing * Math.PI) / 180);
-      if ((nx * ax + ny * ay) * sign < 0.7) continue;
-      const s = (f.mid[0] * ax + f.mid[1] * ay) * sign + f.length * 0.5;
-      if (s > score) {
-        score = s;
-        best = f;
+    // The outermost facades at this end first; the paint goes on the first with a real wall to take it.
+    const ends = list
+      .filter((f) => {
+        if (f.part !== 0 || f.ring !== 0 || f.length < 4.5) return false;
+        const nx = Math.sin((f.bearing * Math.PI) / 180);
+        const ny = Math.cos((f.bearing * Math.PI) / 180);
+        return (nx * ax + ny * ay) * sign >= 0.7;
+      })
+      .map((f) => ({ f, s: (f.mid[0] * ax + f.mid[1] * ay) * sign + f.length * 0.5 }))
+      .sort((a, b) => b.s - a.s);
+    for (const { f } of ends) {
+      const wall = longestWall(outer, f);
+      if (wall) {
+        out.push(wall);
+        break;
       }
     }
-    if (!best) continue;
-    // The facade is a measured line; the paint goes on the longest real wall along it.
-    const nx = Math.sin((best.bearing * Math.PI) / 180);
-    const ny = Math.cos((best.bearing * Math.PI) / 180);
-    const dx = (best.b[0] - best.a[0]) / best.length;
-    const dy = (best.b[1] - best.a[1]) / best.length;
-    let wall: { a: XY; b: XY; len: number } | null = null;
-    for (let i = 0; i < outer.length; i++) {
-      const p = outer[i];
-      const q = outer[(i + 1) % outer.length];
-      const len = Math.hypot(q[0] - p[0], q[1] - p[1]);
-      if (len < 2.5) continue;
-      const enx = (q[1] - p[1]) / len;
-      const eny = -(q[0] - p[0]) / len;
-      if (enx * nx + eny * ny < 0.985) continue;
-      const mx = (p[0] + q[0]) / 2 - best.a[0];
-      const my = (p[1] + q[1]) / 2 - best.a[1];
-      const t = mx * dx + my * dy;
-      if (Math.abs(mx * nx + my * ny) > 2.6 || t < 0 || t > best.length) continue;
-      if (!wall || len > wall.len) wall = { a: p, b: q, len };
-    }
-    if (wall) out.push(wall);
   }
   return out;
+}
+
+/** The longest real wall along a facade's measured line, if one is long enough to paint on. */
+function longestWall(outer: Ring, best: Facade): { a: XY; b: XY; len: number } | null {
+  const nx = Math.sin((best.bearing * Math.PI) / 180);
+  const ny = Math.cos((best.bearing * Math.PI) / 180);
+  const dx = (best.b[0] - best.a[0]) / best.length;
+  const dy = (best.b[1] - best.a[1]) / best.length;
+  let wall: { a: XY; b: XY; len: number } | null = null;
+  for (let i = 0; i < outer.length; i++) {
+    const p = outer[i];
+    const q = outer[(i + 1) % outer.length];
+    const len = Math.hypot(q[0] - p[0], q[1] - p[1]);
+    if (len < 2.5) continue;
+    const enx = (q[1] - p[1]) / len;
+    const eny = -(q[0] - p[0]) / len;
+    if (enx * nx + eny * ny < 0.985) continue;
+    const mx = (p[0] + q[0]) / 2 - best.a[0];
+    const my = (p[1] + q[1]) / 2 - best.a[1];
+    const t = mx * dx + my * dy;
+    if (Math.abs(mx * nx + my * ny) > 2.6 || t < 0 || t > best.length) continue;
+    if (!wall || len > wall.len) wall = { a: p, b: q, len };
+  }
+  return wall;
 }
 
 /** Contact shade round every footprint, baked once: the soft dark line where a model meets its table. */
@@ -542,12 +670,22 @@ export function buildSite(spec: BlockSite, coarse: boolean, onRepaint: () => voi
     uBandOn: { value: 0 },
     uNight: { value: 0 },
     uMark: { value: col(PAL.sun).clone() },
-    uGlow: { value: new THREE.Color(0xffc98c).multiplyScalar(0.9) },
-    uHaze: { value: new THREE.Color(0, 0, 0) },
-    uCast: { value: 0 },
+    uGlow: { value: new THREE.Color(0xffc98c).multiplyScalar(0.8) },
     uContact: { value: 0.3 },
-    uGround: { value: 1 }
+    uGround: { value: 1 },
+    uShade: { value: new THREE.Color(1, 1, 1) },
+    uSunK: { value: 1 },
+    uFog: { value: new THREE.Vector4() },
+    uFogAt: { value: new THREE.Vector3() },
+    uFogRange: { value: new THREE.Vector2(60, 260) },
+    uHideMin: { value: new THREE.Vector3(1, 1, 1) },
+    uHideMax: { value: new THREE.Vector3(-1, -1, -1) }
   };
+  const cards = { uCard: { value: col(CARD).clone() }, uContext: { value: col(CONTEXT).clone() }, uRoof: { value: top } };
+
+  // The walls the number is painted on stay blank, as a block's end walls are.
+  const painted = numberWalls(parts, list);
+  const blank = (p: XY, q: XY) => painted.some((w) => w.a === p && w.b === q);
 
   // ── The chosen block: every wall cut at every storey, so storeys can be marked and the block opened.
   let seed = 0;
@@ -559,8 +697,8 @@ export function buildSite(spec: BlockSite, coarse: boolean, onRepaint: () => voi
       if (len < 0.05) continue;
       // Building on the left, view on the right: the outward normal of (dx, dy) is (dy, -dx), and z is south.
       const n = new THREE.Vector3((q[1] - p[1]) / len, 0, (q[0] - p[0]) / len);
-      // Kind 0 (a wall) plus a fraction that varies wall to wall, for which windows are lit at night.
-      const wall = 0.9 * Math.abs((Math.sin(++seed * 12.9898) * 43758.5453) % 1);
+      // Kind 0 (a wall) or 4 (a blank one), plus a fraction that varies wall to wall, for which windows are lit at night.
+      const wall = (blank(p, q) ? 4 : 0) + 0.9 * Math.abs((Math.sin(++seed * 12.9898) * 43758.5453) % 1);
       for (let k = 1; k <= S; k++) {
         const y0 = floorY(k);
         const y1 = k === S ? top : floorY(k + 1);
@@ -622,7 +760,7 @@ export function buildSite(spec: BlockSite, coarse: boolean, onRepaint: () => voi
     for (const p of nb.footprint.parts) solid.cap(triangulate(p), h, true, -1);
   }
 
-  const solidMat = siteShade(new THREE.MeshLambertMaterial({ color: col(PAL.wall) }), u, 'blk-site', true);
+  const solidMat = siteShade(new THREE.MeshLambertMaterial({ color: col(PAL.wall) }), u, cards, 'blk-site', true);
   const solidMesh = new THREE.Mesh(solid.build(), solidMat);
   solidMesh.castShadow = true;
   solidMesh.receiveShadow = true;
@@ -644,29 +782,27 @@ export function buildSite(spec: BlockSite, coarse: boolean, onRepaint: () => voi
   };
 
   // ── Lines: the chosen block's roofline in graphite, the neighbours' fainter.
-  const lines = new THREE.LineSegments(lineLoops(rings(parts), top + PARAPET), new THREE.LineBasicMaterial({ color: PAL.capSolid, transparent: true, opacity: 0.6 }));
+  const lines = new THREE.LineSegments(lineLoops(rings(parts), top + PARAPET), new THREE.LineBasicMaterial({ color: PAL.capSolid, transparent: true, opacity: 0.7 }));
   root.add(lines);
   const faintPts: THREE.BufferGeometry[] = block.neighbours.map((nb) => lineLoops(rings(nb.footprint.parts), roofY(neighbourStoreys(nb, spec))));
   const faintGeo = mergeLines(faintPts);
   const faint = new THREE.LineSegments(faintGeo, new THREE.LineBasicMaterial({ color: PAL.capSolid, transparent: true, opacity: 0.22 }));
   root.add(faint);
 
-  // ── The block number on the end walls.
-  const paint = paintNumber(spec.label.trim() || block.blk);
+  // ── The block number, near the top of each end wall. One way of setting it for both walls, so one texture serves.
+  const label = spec.label.trim() || block.blk;
+  const vertical = painted.length > 0 && numberStacks(label, Math.min(...painted.map((w) => w.len)), top);
+  const paint = paintNumber(label, vertical);
   const numTex = new THREE.CanvasTexture(paint.canvas);
   numTex.colorSpace = THREE.SRGBColorSpace;
-  numTex.anisotropy = 4;
+  numTex.anisotropy = 8;
   const decal = new Solid();
   const uv: number[] = [];
-  for (const w of numberWalls(parts, list)) {
-    const cap = clamp(w.len * 0.3, 1.8, 5.2);
-    let hq = cap / 0.72;
-    let wq = hq * paint.aspect;
-    if (wq > w.len * 0.9) {
-      wq = w.len * 0.9;
-      hq = wq / paint.aspect;
-    }
-    const yc = top - 1.2 - hq / 2;
+  for (const w of painted) {
+    // Metres to a canvas pixel, from the height a figure stands.
+    const k = figureHeight(label, w.len, top, vertical) / FIG_CAP;
+    const cw = paint.cellW * k;
+    const ch = paint.cellH * k;
     const dx = (w.b[0] - w.a[0]) / w.len;
     const dy = (w.b[1] - w.a[1]) / w.len;
     const n = new THREE.Vector3(dy, 0, dx);
@@ -674,15 +810,22 @@ export function buildSite(spec: BlockSite, coarse: boolean, onRepaint: () => voi
     const mx = (w.a[0] + w.b[0]) / 2 + dy * off;
     const my = (w.a[1] + w.b[1]) / 2 - dx * off;
     const at = (s: number, y: number) => site([mx + dx * s, my + dy * s], y);
-    const st = storeyAt(yc, S);
-    decal.quad(at(-wq / 2, yc - hq / 2), at(wq / 2, yc - hq / 2), at(wq / 2, yc + hq / 2), at(-wq / 2, yc + hq / 2), n, st, 0, 0, 0, 1);
-    uv.push(0, 0, 1, 0, 1, 1, 0, 1);
+    // The first figure's top a little under the parapet, as the painters set it.
+    const y1 = top - 1.3 + FIG_PAD * k;
+    paint.cells.forEach(([u0, v0, u1, v1], i) => {
+      const hi = y1 - i * ch;
+      const lo = hi - ch;
+      // Each figure on its own storey, so it lifts or sinks with that storey in the push-in.
+      decal.quad(at(-cw / 2, lo), at(cw / 2, lo), at(cw / 2, hi), at(-cw / 2, hi), n, storeyAt((lo + hi) / 2, S), 0, 0, 0, 1);
+      uv.push(u0, v0, u1, v0, u1, v1, u0, v1);
+    });
   }
   const decalGeo = decal.build();
   decalGeo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
   const decalMat = siteShade(
     new THREE.MeshLambertMaterial({ map: numTex, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -4 }),
     u,
+    cards,
     'blk-site-paint',
     false
   );
@@ -691,7 +834,7 @@ export function buildSite(spec: BlockSite, coarse: boolean, onRepaint: () => voi
   decals.renderOrder = 1;
   root.add(decals);
   // The page's own figures may still be loading; repaint once they are here.
-  const font = '700 150px "Barlow Condensed"';
+  const font = `700 ${FIG}px "Barlow Condensed"`;
   if (document.fonts && !document.fonts.check(font))
     void document.fonts.load(font).then(() => {
       paint.redraw();
