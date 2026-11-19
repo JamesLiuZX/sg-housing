@@ -6,9 +6,9 @@ import * as THREE from 'three';
  * While anything moves, the viewer draws its one fast pass straight to the
  * canvas, as it always has. Once the picture is still, it is refined here,
  * one sample per animation frame, into the average of many samples, the way
- * a design tool's viewport settles. Each sample is the scene drawn exactly as
- * the fast pass draws it (same programs, same tone mapping, same multisampled
- * canvas), with three things moved a little:
+ * a design tool's viewport settles. Each sample is the scene drawn as the
+ * fast pass draws it (same tone mapping, same multisampled canvas, the same
+ * programs plus one lookup), with three things moved a little:
  *
  * - the camera, by a fraction of a pixel, so edges and thin parts come out
  *   supersampled;
@@ -36,6 +36,10 @@ import * as THREE from 'three';
  * page come out right. The running mean is held in half float where the
  * device can render to it; elsewhere in two eight-bit buffers that dither
  * each step, so the mean stays unbiased.
+ *
+ * The fast pass is left exactly as it was: the dome's lookup lives in a
+ * second program for each lit material, compiled in the background once the
+ * model is up and used only while samples are drawn.
  */
 
 export type Quality = 'fast' | 'full';
@@ -73,7 +77,7 @@ const R2B = 0.5698402909980532;
 const frac = (x: number) => x - Math.floor(x);
 
 /** The radical inverse of i in a base: the Halton sequence. */
-function halton(i: number, base: number): number {
+export function halton(i: number, base: number): number {
   let f = 1;
   let r = 0;
   while (i > 0) {
@@ -84,10 +88,40 @@ function halton(i: number, base: number): number {
   return r;
 }
 
+/**
+ * Sample k's sun (from 1): `sun` turned to a point of the disc round it,
+ * spread evenly over the disc's area by an R2 sequence, so any number of
+ * samples covers it well.
+ */
+export function sunSample(k: number, sun: THREE.Vector3, out: THREE.Vector3): THREE.Vector3 {
+  const r = Math.sqrt(frac(0.5 + k * R2A)) * SUN_DISC * (Math.PI / 180);
+  const a = frac(0.5 + k * R2B) * Math.PI * 2;
+  const d = sun.clone().normalize();
+  const t1 = new THREE.Vector3(0, 1, 0).cross(d);
+  if (t1.lengthSq() < 1e-6) t1.set(1, 0, 0);
+  t1.normalize();
+  const t2 = d.clone().cross(t1);
+  return out.copy(d).addScaledVector(t1, Math.tan(r) * Math.cos(a)).addScaledVector(t2, Math.tan(r) * Math.sin(a)).normalize();
+}
+
+/** Sample k's dome light (from 1): a direction in the cone round the zenith, cosine-weighted, from a second R2 sequence. */
+export function domeSample(k: number, out: THREE.Vector3): THREE.Vector3 {
+  const s2 = frac(0.21 + k * R2B) * Math.sin((DOME_CONE * Math.PI) / 180) ** 2;
+  const phi = frac(0.73 + k * R2A) * Math.PI * 2;
+  const st = Math.sqrt(s2);
+  return out.set(st * Math.cos(phi), Math.sqrt(1 - s2), st * Math.sin(phi));
+}
+
+/** Sample k's camera offset, pixels: a Gaussian spread from the Halton sequence by Box-Muller, cut off at 2.5 spreads. */
+export function jitterSample(k: number): [number, number] {
+  const u = Math.max(1e-6, halton(k, 2));
+  const v = halton(k, 3);
+  const r = Math.min(2.5, Math.sqrt(-2 * Math.log(u))) * JITTER;
+  return [r * Math.cos(2 * Math.PI * v), r * Math.sin(2 * Math.PI * v)];
+}
+
 /** The uniforms every lit material reads for the dome, shared by all of them. */
 export interface DomeUniforms {
-  /** 1 while a settled sample is drawn, 0 for the fast pass. */
-  uBlkDomeOn: THREE.IUniform<number>;
   /** The dome's depth, packed, for finding what shades a point and how far off it is. */
   uBlkDomeMap: THREE.IUniform<THREE.Texture | null>;
   /** The same depth as a depth texture compared in hardware, for the blur. */
@@ -118,7 +152,6 @@ export interface DomeUniforms {
  * proportion to that distance, so neighbouring samples' shadows join up.
  */
 const DOME_PARS = /* glsl */ `
-uniform float uBlkDomeOn;
 uniform sampler2D uBlkDomeMap;
 uniform sampler2DShadow uBlkDomeShadow;
 uniform mat4 uBlkDomeMatrix;
@@ -181,7 +214,7 @@ float blkDome( vec3 viewPos, vec3 viewNormal ) {
 
 /** Ahead of three's indirect diffuse: the light that is not the sun's or the fill's, kept off what the dome cannot see. */
 const DOME_APPLY = /* glsl */ `
-if ( uBlkDomeOn > 0.5 ) irradiance *= blkDome( geometryPosition, geometryNormal );
+irradiance *= blkDome( geometryPosition, geometryNormal );
 `;
 
 const QUAD_VERT = /* glsl */ `
@@ -249,7 +282,6 @@ export interface SampleLights {
 
 export class Settle {
   readonly uniforms: DomeUniforms = {
-    uBlkDomeOn: { value: 0 },
     uBlkDomeMap: { value: null },
     uBlkDomeShadow: { value: null },
     uBlkDomeMatrix: { value: new THREE.Matrix4() },
@@ -268,6 +300,14 @@ export class Settle {
   /** Set by a caller: exactly this many samples, with no timing. */
   private fixed: number | null = null;
   private began = false;
+  /** The lit materials that can read the dome, and whether they are drawn with the variant that does. */
+  private mats = new Set<THREE.Material>();
+  private domeOn = false;
+  /** The dome's programs are compiled for every lit material, so the first sample does not stall. */
+  ready = false;
+  private preparing = false;
+  /** Bumped when the context comes back, so a compile check begun before it stops. */
+  private generation = 0;
   private lastAt = 0;
   private spent = 0;
   private timed = 0;
@@ -362,9 +402,11 @@ export class Settle {
   }
 
   /**
-   * Makes every lit material under `root` read the dome. Each keeps its own
-   * shader and gains a uniform-guarded lookup, so the fast pass pays nothing
-   * but the branch; done once per material, before it is first drawn.
+   * Gives every lit material under `root` a second program, which reads the
+   * dome; done once per material, before it is first drawn. The fast pass
+   * keeps each material's own program, untouched, so it costs exactly what it
+   * did; the settled samples switch to the second, compiled in the background
+   * beforehand (prepare), and back.
    */
   adopt(root: THREE.Object3D): void {
     const seen = new Set<THREE.Material>();
@@ -379,6 +421,9 @@ export class Settle {
     const lit = (mat as THREE.MeshLambertMaterial).isMeshLambertMaterial || (mat as THREE.MeshStandardMaterial).isMeshStandardMaterial || (mat as THREE.MeshPhongMaterial).isMeshPhongMaterial;
     if (!lit || mat.userData.blkDome) return;
     mat.userData.blkDome = true;
+    this.mats.add(mat);
+    this.ready = false;
+    mat.addEventListener('dispose', () => this.mats.delete(mat));
     const before = mat.onBeforeCompile;
     // A material left with three's default key is keyed by its compile hook's source, which is about to change.
     const own = mat.customProgramCacheKey === THREE.Material.prototype.customProgramCacheKey ? before.toString() : null;
@@ -386,37 +431,60 @@ export class Settle {
     const u = this.uniforms;
     mat.onBeforeCompile = (shader, renderer) => {
       before.call(mat, shader, renderer);
-      if (!shader.fragmentShader.includes('#include <packing>') || !shader.fragmentShader.includes('#include <lights_fragment_end>')) return;
+      if (!this.domeOn || !shader.fragmentShader.includes('#include <packing>') || !shader.fragmentShader.includes('#include <lights_fragment_end>')) return;
       Object.assign(shader.uniforms, u);
       shader.fragmentShader = shader.fragmentShader
         .replace('#include <packing>', '#include <packing>\n' + DOME_PARS)
         .replace('#include <lights_fragment_end>', DOME_APPLY + '#include <lights_fragment_end>');
     };
-    mat.customProgramCacheKey = () => (own ?? key()) + '|blk-dome';
-    mat.needsUpdate = true;
+    mat.customProgramCacheKey = () => (own ?? key()) + (this.domeOn ? '|blk-dome' : '');
+    // Adopted in the middle of a settle, it needs the dome's program at once; otherwise its key is unchanged.
+    if (this.domeOn) mat.needsUpdate = true;
+  }
+
+  /** Draws the lit materials with the dome's programs, or with their own. */
+  useDome(on: boolean): void {
+    if (on === this.domeOn) return;
+    this.domeOn = on;
+    for (const m of this.mats) m.needsUpdate = true;
+  }
+
+  /**
+   * Compiles the dome's programs for every lit material in the scene, in the
+   * background, while the fast pass goes on with its own. Settling waits for
+   * this, so the first sample never stalls on a shader compile.
+   */
+  prepare(scene: THREE.Scene, camera: THREE.Camera): void {
+    if (this.ready || this.preparing) return;
+    this.preparing = true;
+    const r = this.renderer;
+    const was = this.domeOn;
+    this.domeOn = true;
+    for (const m of this.mats) m.needsUpdate = true;
+    // Issued now; with parallel shader compilation the driver compiles them off this thread.
+    const mats = r.compile(scene, camera);
+    const programs = [...mats].filter((m) => this.mats.has(m)).map((m) => (r.properties.get(m) as { currentProgram?: { isReady(): boolean } }).currentProgram);
+    this.domeOn = was;
+    for (const m of this.mats) m.needsUpdate = true;
+    const generation = this.generation;
+    const started = performance.now();
+    const check = () => {
+      if (generation !== this.generation) return;
+      // A driver that never reports can only be waited on so long; the first sample then finishes the job.
+      if (programs.every((p) => !p || p.isReady()) || performance.now() - started > 4000) {
+        this.preparing = false;
+        this.ready = true;
+        return;
+      }
+      setTimeout(check, 30);
+    };
+    check();
   }
 
   /** The lights for sample k (from 1): the sun within its disc round `sun`, and the dome within its cone. */
   lights(k: number, sun: THREE.Vector3, out: SampleLights): SampleLights {
-    // The sun: area-uniform over the disc, from an R2 sequence.
-    const su = frac(0.5 + k * R2A);
-    const sv = frac(0.5 + k * R2B);
-    const r = Math.sqrt(su) * SUN_DISC * (Math.PI / 180);
-    const a = sv * Math.PI * 2;
-    const d = sun.clone().normalize();
-    const t1 = new THREE.Vector3(0, 1, 0).cross(d);
-    if (t1.lengthSq() < 1e-6) t1.set(1, 0, 0);
-    t1.normalize();
-    const t2 = d.clone().cross(t1);
-    out.sun.copy(d).addScaledVector(t1, Math.tan(r) * Math.cos(a)).addScaledVector(t2, Math.tan(r) * Math.sin(a)).normalize();
-    // The dome: cosine-weighted over the cone, from a second R2 sequence offset from the sun's.
-    const du = frac(0.21 + k * R2B);
-    const dv = frac(0.73 + k * R2A);
-    const s2 = du * Math.sin((DOME_CONE * Math.PI) / 180) ** 2;
-    const st = Math.sqrt(s2);
-    const ct = Math.sqrt(1 - s2);
-    const phi = dv * Math.PI * 2;
-    out.dome.set(st * Math.cos(phi), ct, st * Math.sin(phi));
+    sunSample(k, sun, out.sun);
+    domeSample(k, out.dome);
     // The blur's taps turn by the golden angle from one sample to the next.
     this.uniforms.uBlkDomeSpin.value.set(Math.cos(k * 2.39996323), Math.sin(k * 2.39996323));
     return out;
@@ -532,12 +600,9 @@ export class Settle {
   draw(scene: THREE.Scene, camera: THREE.PerspectiveCamera, k: number): void {
     const P = camera.projectionMatrix;
     this.saved.copy(P);
-    // A Gaussian spread of sub-pixel offsets from the Halton sequence, by Box-Muller.
-    const u = Math.max(1e-6, halton(k, 2));
-    const v = halton(k, 3);
-    const rad = Math.min(2.5, Math.sqrt(-2 * Math.log(u))) * JITTER;
-    P.elements[8] += (2 * rad * Math.cos(2 * Math.PI * v)) / this.size.x;
-    P.elements[9] += (2 * rad * Math.sin(2 * Math.PI * v)) / this.size.y;
+    const [jx, jy] = jitterSample(k);
+    P.elements[8] += (2 * jx) / this.size.x;
+    P.elements[9] += (2 * jy) / this.size.y;
     camera.projectionMatrixInverse.copy(P).invert();
     const r = this.renderer;
     r.setRenderTarget(null);
@@ -592,14 +657,14 @@ export class Settle {
 
   /**
    * Timing, once per sample with the frame's timestamp: on a device that
-   * cannot reach the count in the budget, the count is cut to what fits.
-   * Frames far apart (a hidden tab, a stall) are left out of the measure.
+   * cannot reach the count in the budget, the count is cut to what fits. A
+   * stall counts as a second at most; a hidden tab's gap not at all (pause).
    */
   note(now: number): void {
     if (this.lastAt > 0) {
       const dt = now - this.lastAt;
-      if (dt > 0 && dt < 400) {
-        this.spent += dt;
+      if (dt > 0) {
+        this.spent += Math.min(dt, 1000);
         this.timed++;
       }
     }
@@ -648,6 +713,9 @@ export class Settle {
     this.means = [];
     this.size.set(0, 0);
     this.bindDome();
+    // So did every program: the dome's are compiled again in the background before the next settle.
+    this.ready = this.preparing = false;
+    this.generation++;
     this.reset();
   }
 

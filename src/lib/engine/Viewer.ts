@@ -2689,6 +2689,11 @@ export class Viewer {
     }
     if (now - this.movedAt < SETTLE_DELAY) return;
     const s = this.settle;
+    // The dome's shaders compile in the background the first time; until then the fast picture stands.
+    if (!s.ready) {
+      s.prepare(this.scene, this.camera);
+      return;
+    }
     if (!s.busy) {
       this.drawFast();
       s.begin();
@@ -2723,9 +2728,8 @@ export class Viewer {
     const contact = site ? site.u.uContact.value : 0;
     this.u.uBaked.value = 0;
     if (site) site.u.uContact.value = 0;
-    s.uniforms.uBlkDomeOn.value = 1;
+    s.useDome(true);
     s.draw(this.scene, this.camera, k);
-    s.uniforms.uBlkDomeOn.value = 0;
     this.u.uBaked.value = 1;
     if (site) site.u.uContact.value = contact;
     this.noteDrawn();
@@ -2753,6 +2757,7 @@ export class Viewer {
       s.reset();
       this.restoreSun();
     }
+    s.useDome(false);
     this.isSettled = false;
   }
 
