@@ -16,11 +16,13 @@
  *   ?inset=150        reserves room at the bottom, as the interface's controls do
  *   ?view=unit        turns the block to show the flat's side
  *   ?walk=living      once in the flat, stands in a room looking at its window (?walk=1 at the front door), with no flight in
+ *   ?heights=1        first asks OneMap and data.gov.sg for the neighbours' heights and kinds, as the app does once a block
+ *                     is shown (for up to 20 s); without it the block is built with what this device knows, as the app first is
  *
  * window.blk drives it from tests: setTime, storey, unit, push, enter, exit, jump, plan, walk, verify, stats.
  */
 import * as THREE from 'three';
-import { DEMO_POSTAL, facadeFacing, loadBlock, lookupDemo, type Block } from './lib/data';
+import { DEMO_POSTAL, facadeFacing, knownNeighbourHeights, loadBlock, lookupDemo, lookupNeighbourHeights, type Block } from './lib/data';
 import { Viewer, type FacadePick } from './lib/engine/Viewer';
 import { floorY } from './lib/engine/site';
 import { mainFacade, northForFacing } from './lib/plan/facing';
@@ -167,7 +169,8 @@ void (async () => {
   // The painted number wants the page's figures; offline it falls back after a moment.
   await Promise.race([document.fonts.load('700 150px "Barlow Condensed"'), new Promise((r) => setTimeout(r, 1500))]);
   const { block: b, storeys } = await block();
-  viewer.showBlock({ block: b, storeys, label: b.blk }, inset);
+  if (q.get('heights') === '1') await Promise.race([lookupNeighbourHeights(b), new Promise((r) => setTimeout(r, 20000))]);
+  viewer.showBlock({ block: b, storeys, label: b.blk, neighbourStoreys: knownNeighbourHeights(b).storeys }, inset);
   document.title = `Blk block stage: ${b.blk}`;
   if (marked) viewer.setStorey(marked);
   if (q.has('facing')) place(num('facing', 0), num('along', 0.5));

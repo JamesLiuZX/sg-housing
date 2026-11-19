@@ -8,17 +8,19 @@ import type { Plan, Wall } from '../plan/types';
 import type { PathPoint, Sun } from '../sg/solar';
 import { buildFlat, type Built, type RoomAnchor } from './build';
 import { BOUNCE_SCALE } from './field';
+import type { GroundKind } from './ground';
 import { PAL, col, cutTop, installToneMapping, makeUniforms, type Uniforms } from './materials';
 import { Nav, type P2 } from './nav';
 import { Outdoors } from './outdoors';
 import { placeSite, type Unit } from './placement';
-import { GROUND, PLATE, PLATE_INSIDE, STAGE_HAZE, STOREY, buildSite, floorY, storeyAt, type BlockSite, type SiteModel } from './site';
+import { GROUND, PLATE, PLATE_INSIDE, STAGE_HAZE, STOREY, buildSite, floorY, litAt, storeyAt, type BlockSite, type SiteModel } from './site';
 import { skyStops } from './sky';
 import { litFaces } from './sunlit';
 import { Tweens, clamp, ease, lerp, smooth } from './tween';
 
 export type { BlockSite } from './site';
 export type { Unit } from './placement';
+export type { GroundKind } from './ground';
 
 export type Lens = 'space' | 'sun' | 'rules';
 export type Mode = 'plan' | 'doll' | 'walk' | 'block';
@@ -45,6 +47,8 @@ export interface Hooks {
   storey?: (n: number) => void;
   /** Block mode: the person tapped a side of the block. */
   facade?: (pick: FacadePick) => void;
+  /** OneMap's base map has come onto the table, or left it: its attribution must show while it is there. */
+  map?: (shown: boolean) => void;
 }
 
 const DEG = Math.PI / 180;
@@ -329,6 +333,8 @@ export class Viewer {
   /** A press on the block, until it shows whether it scrubs the storey or orbits. */
   private grab: { id: number; x: number; y: number; scrub: boolean; plane: THREE.Plane } | null = null;
   private coarse: boolean;
+  /** What the site stands on: OneMap's map, or the plain paper table. Kept for every block shown. */
+  private groundKind: GroundKind = 'map';
 
   constructor(canvas: HTMLCanvasElement, plan: Plan, hooks: Hooks = {}) {
     this.canvas = canvas;
@@ -1100,6 +1106,8 @@ export class Viewer {
       const su = this.site.u;
       su.uContact.value = lerp(0.16, 0.3, day);
       su.uNight.value = lamps;
+      // More flats are lit at eight in the evening than after midnight.
+      su.uLit.value = litAt(this.sun, this.dayPath);
       su.uSunK.value = SITE_SUN;
       // After dark the sky's light is so dim, and so blue, that the tone map's toe would crush white card to
       // black and push what is left to a saturated blue. A moonlit lift, strongest in red where the night sky
@@ -1524,7 +1532,7 @@ export class Viewer {
     this.leaveWalkNow();
     this.select(null);
     this.siteSpec = site;
-    this.site = buildSite(site, this.coarse, () => (this.dirty = true));
+    this.site = buildSite(site, this.coarse, () => (this.dirty = true), { kind: this.groundKind, onShown: (s) => this.hooks.map?.(s) });
     this.site.u.uSiteShadow.value = this.outdoors.map.texture;
     this.siteShadowDirty = true;
     this.scene.add(this.site.root);
@@ -1560,6 +1568,22 @@ export class Viewer {
   setStorey(n: number): void {
     this.marked = this.site ? clamp(Math.round(n), 0, this.site.storeys) : Math.max(0, Math.round(n));
     this.applyBand(false);
+  }
+
+  /**
+   * What the site stands on: 'map', OneMap's base map printed on the table
+   * and the ground below the windows (the default), or 'paper', the plain
+   * table. It fades across, and holds for every block shown after.
+   */
+  setGround(kind: GroundKind): void {
+    this.groundKind = kind;
+    this.site?.map.setKind(kind);
+    this.dirty = true;
+  }
+
+  /** What the site stands on, as last set. */
+  get ground(): GroundKind {
+    return this.groundKind;
   }
 
   /**
