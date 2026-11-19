@@ -885,10 +885,11 @@ export class Viewer {
     this.lens = lens;
     const rule0 = this.u.uRule.value;
     const rule1 = lens === 'rules' ? 1 : 0;
-    if (rule0 !== rule1) void this.tweens.run('rule', 0.55, (k) => (this.u.uRule.value = lerp(rule0, rule1, k)));
+    // Also when a tween toward the other lens has not moved the value yet, or it would finish there.
+    if (rule0 !== rule1 || this.tweens.has('rule')) void this.tweens.run('rule', 0.55, (k) => (this.u.uRule.value = lerp(rule0, rule1, k)));
     const c0 = this.compassShow;
     const c1 = lens === 'sun' ? 1 : 0;
-    if (c0 !== c1) void this.tweens.run('compass', 0.6, (k) => this.setCompass(lerp(c0, c1, k)));
+    if (c0 !== c1 || this.tweens.has('compass')) void this.tweens.run('compass', 0.6, (k) => this.setCompass(lerp(c0, c1, k)));
     this.syncFurniture();
     if (lens !== 'rules') this.select(null);
     // Choosing the Sun lens hands it the angle again, until the person next turns the view.
@@ -1033,7 +1034,7 @@ export class Viewer {
     if (this.mode === 'plan') return;
     const want = this.furnished && this.lens !== 'rules' ? 1 : 0;
     const from = this.u.uPop.value;
-    if (from === want) return;
+    if (from === want && !this.tweens.has('pop')) return;
     for (const o of this.built.furniture) o.visible = true;
     void this.tweens
       .run('pop', want ? 1.1 : 0.7, (k) => (this.u.uPop.value = lerp(from, want, k)), { ease: want ? ease.linear : ease.inOut })
@@ -1750,7 +1751,7 @@ export class Viewer {
       textures: i.memory.textures,
       samples: this.settle.count,
       target: this.picture === 'full' ? this.settle.target : 0,
-      settled: this.isSettled,
+      settled: this.isSettled && !this.dirty,
       quality: this.picture,
       settleBytes: this.settle.memory()
     };
@@ -1779,7 +1780,8 @@ export class Viewer {
    * with quality 'fast', drawn and still. Any change in between only defers it.
    */
   settled(): Promise<void> {
-    if (this.isSettled) return Promise.resolve();
+    // A change made since the last frame has not been drawn yet: it unsettles the picture on the next one.
+    if (this.isSettled && !this.dirty && !this.tweens.active) return Promise.resolve();
     return new Promise((resolve) => this.waiters.push(resolve));
   }
 
@@ -2675,7 +2677,12 @@ export class Viewer {
    * per frame until there are enough. Then nothing is drawn at all.
    */
   private refine(now: number): void {
-    if (this.isSettled || document.hidden) return;
+    if (this.isSettled) {
+      // Asked for while a change was waiting to be drawn, and none came of it.
+      if (this.waiters.length) this.flushWaiters();
+      return;
+    }
+    if (document.hidden) return;
     if (this.picture === 'fast') {
       this.markSettled();
       return;
@@ -2758,10 +2765,12 @@ export class Viewer {
   private markSettled(): void {
     if (this.isSettled) return;
     this.isSettled = true;
-    const waiting = this.waiters;
-    this.waiters = [];
-    for (const f of waiting) f();
+    this.flushWaiters();
     this.hooks.settled?.();
+  }
+
+  private flushWaiters(): void {
+    for (const f of this.waiters.splice(0)) f();
   }
 
   private onContextLost = (): void => {
@@ -2803,6 +2812,6 @@ export class Viewer {
     this.settle.dispose();
     this.renderer.dispose();
     // Nothing more will be drawn; whoever waits for the picture to settle is let go.
-    for (const f of this.waiters.splice(0)) f();
+    this.flushWaiters();
   }
 }

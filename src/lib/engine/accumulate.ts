@@ -216,7 +216,9 @@ void main() {
  * The canvas: the fast frame and the mean, the mean's share growing to all of
  * it. Half a level of fixed screen-space noise keeps the long, faint
  * gradients of the settled shadows from banding in eight bits; it is scaled
- * by coverage so the page round the model stays clean.
+ * by coverage so the page round the model stays clean. Colour is not held to
+ * alpha: the sun's glow is drawn additively over the page, and composites as
+ * light there, as it does from the fast pass.
  */
 const SHOW_FRAG = /* glsl */ `
 uniform sampler2D tFast;
@@ -227,7 +229,7 @@ void main() {
   vec2 uv = gl_FragCoord.xy / uSize;
   vec4 c = mix( texture2D( tFast, uv ), texture2D( tMean, uv ), uW );
   float n = fract( 52.9829189 * fract( dot( gl_FragCoord.xy, vec2( 0.06711056, 0.00583715 ) ) ) ) - 0.5;
-  c.rgb = clamp( c.rgb + n * ( 1.0 / 255.0 ) * c.a, 0.0, c.a );
+  c.rgb = max( c.rgb + n * ( 1.0 / 255.0 ) * c.a, 0.0 );
   gl_FragColor = c;
 }`;
 
@@ -641,6 +643,9 @@ export class Settle {
 
   /** After the context was lost: the buffers are recreated when next used. */
   restored(): void {
+    // The old buffers died with the context: let them go without deleting them from the new one.
+    this.fast = this.sample = null;
+    this.means = [];
     this.size.set(0, 0);
     this.bindDome();
     this.reset();
