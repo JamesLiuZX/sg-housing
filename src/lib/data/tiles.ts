@@ -21,6 +21,7 @@
  */
 
 import { toBlockFrame } from './blocks';
+import { DEMO_POSTAL } from './demo';
 import { untilAborted } from './http';
 import { localFrame } from './shard';
 import type { Block, Bounds, XY } from './types';
@@ -29,14 +30,16 @@ import type { Block, Bounds, XY } from './types';
 export const TILE_PX = 256;
 
 /**
- * The highest zoom each of OneMap's published styles serves, as probed on
- * 18 November 2026 at Clementi: one zoom further answers 200 with an empty
- * body. OneMap's TileJSON gives 11 as the lowest. An `_HD` tile at zoom z is
- * drawn with the line weights and lettering of zoom z - 1 at twice the
- * detail, which is how OneMap's TileJSON serves its maps to high-density
- * screens. (The aerial photograph the OneMap website shows is served from
- * the same address as "Satellite" up to zoom 20, but it is not part of the
- * published base map service, so it is not listed here.)
+ * The highest zoom each of OneMap's styles serves, as probed on 18 November
+ * 2026 at Clementi: one zoom further answers 200 with an empty body.
+ * OneMap's TileJSON gives 11 as the lowest. An `_HD` tile at zoom z is drawn
+ * with the line weights and lettering of zoom z - 1 at twice the detail,
+ * which is how OneMap's TileJSON serves its maps to high-density screens.
+ *
+ * `Satellite` is the aerial photograph ("Orthophoto" on OneMap's own site),
+ * served as JPEG from the same address. OneMap's developer pages list the
+ * drawn maps only, so the photograph is used on the same terms and with the
+ * same attribution, and is the one style to confirm with SLA before launch.
  */
 export const MAX_ZOOM = {
   Default: 19,
@@ -48,7 +51,8 @@ export const MAX_ZOOM = {
   Grey_HD: 20,
   Night_HD: 20,
   GreyLite: 20,
-  LandLot: 20
+  LandLot: 20,
+  Satellite: 20
 } as const;
 
 export type MapStyle = keyof typeof MAX_ZOOM;
@@ -172,13 +176,62 @@ const settled = new Map<string, Blob | null>();
 
 /** No tile ever takes longer than this, so one stalled request cannot hold a slot for good. */
 const TIMEOUT_MS = 15000;
+/** Requests to OneMap in flight at once, however many maps are loading: what a browser allows one host over HTTP/1.1. */
+const MAX_ACTIVE = 6;
 
-function fetchBlob(url: string): Promise<Blob | null> {
-  let p = blobs.get(url);
-  if (p) return p;
+let active = 0;
+const queue: { start: () => void; signal?: AbortSignal }[] = [];
+
+/** Waits for one of the request slots. False when `signal` fires first; a slot taken must be given back with `release`. */
+function slot(signal?: AbortSignal): Promise<boolean> {
+  if (signal?.aborted) return Promise.resolve(false);
+  if (active < MAX_ACTIVE) {
+    active++;
+    return Promise.resolve(true);
+  }
+  return new Promise((done) => {
+    const entry = {
+      signal,
+      start: () => {
+        signal?.removeEventListener('abort', stop);
+        done(true);
+      }
+    };
+    const stop = (): void => {
+      const i = queue.indexOf(entry);
+      if (i >= 0) queue.splice(i, 1);
+      done(false);
+    };
+    signal?.addEventListener('abort', stop, { once: true });
+    queue.push(entry);
+  });
+}
+
+function release(): void {
+  const next = queue.shift();
+  if (next) next.start();
+  else active--;
+}
+
+/**
+ * A tile's bytes: from this session's store, or fetched once a request slot
+ * is free. A request under way is shared and runs to its end even if the
+ * caller who started it has gone, so the tile is there for the next one.
+ * Resolves null when there is no tile, or `signal` fired before a slot came.
+ */
+async function fetchBlob(url: string, signal?: AbortSignal): Promise<Blob | null> {
+  const had = blobs.get(url);
+  if (had) return had;
+  if (!(await slot(signal))) return null;
+  // Someone else may have started it while this caller waited its turn.
+  const now = blobs.get(url);
+  if (now) {
+    release();
+    return now;
+  }
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), TIMEOUT_MS);
-  p = (async (): Promise<Blob | null> => {
+  const p = (async (): Promise<Blob | null> => {
     // CORS without credentials, as crossOrigin="anonymous" asks for an image, so the canvas it is drawn on stays usable by WebGL.
     // No cookies and no referrer: nothing about the person or the page goes with the request.
     const res = await fetch(url, { mode: 'cors', credentials: 'omit', referrerPolicy: 'no-referrer', signal: ctl.signal });
@@ -187,19 +240,17 @@ function fetchBlob(url: string): Promise<Blob | null> {
     const blob = await res.blob();
     return blob.size > 0 ? blob : null;
   })();
-  const mine = p;
-  blobs.set(url, mine);
-  mine.then(
-    (b) => {
-      clearTimeout(timer);
-      settled.set(url, b);
-    },
+  blobs.set(url, p);
+  p.then(
+    (b) => settled.set(url, b),
     () => {
-      clearTimeout(timer);
-      if (blobs.get(url) === mine) blobs.delete(url);
+      if (blobs.get(url) === p) blobs.delete(url);
     }
-  );
-  return mine;
+  ).finally(() => {
+    clearTimeout(timer);
+    release();
+  });
+  return p;
 }
 
 async function decode(blob: Blob): Promise<TileImage | null> {
@@ -233,7 +284,7 @@ export function tileKnown(url: string): boolean {
 export async function loadTile(url: string, signal?: AbortSignal): Promise<TileImage | null> {
   if (signal?.aborted) return null;
   const blob = await untilAborted(
-    fetchBlob(url).catch(() => null),
+    fetchBlob(url, signal).catch(() => null),
     signal
   );
   if (!blob || signal?.aborted) return null;
@@ -279,4 +330,38 @@ export async function loadTiles(urls: string[], onTile: (index: number, tile: Ti
 export function clearTiles(): void {
   blobs.clear();
   settled.clear();
+  queue.length = 0;
+  active = 0;
+}
+
+// ── The bundled map ─────────────────────────────────────────────────────────
+
+/** A map that came with the app, for a block that must look right with no network: one picture of a whole tile range. */
+export interface BundledMap {
+  /** The tiles the picture is a mosaic of, edge to edge. */
+  range: TileRange;
+  /** The picture, by day or after dark; null if it cannot be decoded. */
+  image(night: boolean): Promise<TileImage | null>;
+}
+
+/**
+ * The map bundled for a block, if there is one: only the demo block has. The
+ * pictures are kept out of the first load and decoded when asked for; nothing
+ * here touches the network.
+ */
+export async function bundledMap(postal: string): Promise<BundledMap | null> {
+  if (postal !== DEMO_POSTAL) return null;
+  try {
+    const { DEMO_GROUND } = await import('./demo-ground');
+    if (DEMO_GROUND.postal !== postal || !DEMO_GROUND.day) return null;
+    const picture = (base64: string): Promise<TileImage | null> => {
+      const text = atob(base64);
+      const bytes = new Uint8Array(text.length);
+      for (let i = 0; i < text.length; i++) bytes[i] = text.charCodeAt(i);
+      return decode(new Blob([bytes], { type: DEMO_GROUND.type }));
+    };
+    return { range: DEMO_GROUND.range, image: (night) => picture(night ? DEMO_GROUND.night : DEMO_GROUND.day) };
+  } catch {
+    return null;
+  }
 }

@@ -6,6 +6,7 @@ import { decodeRow, localFrame } from './shard';
 import {
   MAX_ZOOM,
   TILE_PX,
+  bundledMap,
   clearTiles,
   coverSquare,
   frameToPixel,
@@ -234,6 +235,39 @@ describe('loading tiles', () => {
     await loadTiles(urls, (i, t) => t && got.push(i), { concurrency: 3 });
     expect(most).toBe(3);
     expect(got.sort((a, b) => a - b)).toEqual(urls.map((_, i) => i));
+  });
+
+  it('never has more than six requests in flight, however many maps are loading at once', async () => {
+    stubDecode();
+    let live = 0;
+    let most = 0;
+    mockFetch(async () => {
+      live++;
+      most = Math.max(most, live);
+      await new Promise((r) => setTimeout(r, 2));
+      live--;
+      return png();
+    });
+    const field = (z: number) => tilesIn({ z, x0: 0, y0: 0, x1: 4, y1: 4 }).map((t) => tileUrl('Grey', t));
+    let got = 0;
+    await Promise.all([16, 17, 18].map((z) => loadTiles(field(z), (_, t) => t && got++, { concurrency: 4 })));
+    expect(most).toBe(6);
+    expect(got).toBe(48);
+  });
+
+  it('has a bundled map for the demo block only, and it needs no network', async () => {
+    const calls = mockFetch(blocked);
+    expect(await bundledMap('520201')).toBeNull();
+    const demoMap = await bundledMap('121440');
+    // The pictures are written by `npm run demo`; with them, the range is the tiles they are a mosaic of.
+    if (demoMap) {
+      const b = rangeBounds(demo, demoMap.range);
+      expect(b.minX).toBeLessThan(-200);
+      expect(b.maxX).toBeGreaterThan(200);
+      expect(b.minY).toBeLessThan(-200);
+      expect(b.maxY).toBeGreaterThan(200);
+    }
+    expect(calls).toHaveLength(0);
   });
 
   it('stops asking once the signal fires, and closes what arrives after', async () => {

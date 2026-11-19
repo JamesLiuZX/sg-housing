@@ -71,8 +71,10 @@ export interface BlockSite {
   /**
    * What the neighbouring buildings are, by postal code, where HDB's records
    * say. Left out, what this device already knows is used: the bundled
-   * snapshot and earlier lookups. Only a building known to hold flats is drawn
-   * with them; a car park is drawn as open decks, anything else as a plain mass.
+   * snapshot and earlier lookups. A building known to hold flats is drawn
+   * with them, a car park as open decks, anything else known as a plain mass;
+   * one with no record yet is drawn as flats only if it has the plan of a
+   * block of flats (drawnAs).
    */
   neighbourKinds?: Record<string, BuildingKind>;
 }
@@ -220,8 +222,12 @@ varying float vLow;
 // of wall from corner to corner, round any gentle curve); z the run's length; w the kind plus a per-run
 // seed below 1. Kinds: 0 a wall of flats, 1 a roof, lid or section, 2 a parapet, 3 a roof plant room,
 // 4 a blank wall of flats (an end wall, or the one that carries the painted number), 5 a car park's
-// wall, 6 the wall of anything else. aSpan: x the roof a parapet or plant room stands on, y a plant
-// room's height or a car park's deck to deck, metres.
+// wall, 6 the wall of anything else. aSpan, by kind: for a wall of flats, x its bays and y whether its
+// ground storey is open (1) or not (0); for a car park's wall, x its column bays and y deck to deck,
+// metres; for a parapet or plant room, x the roof it stands on and y a plant room's height, metres.
+// Whatever is decided once for a whole run (its bays, whether it has windows) is decided where the
+// run is built and carried as a whole number: a test on a length interpolated across a wall would flip
+// from pixel to pixel wherever the length sits on the threshold, and footprints are on a 0.1 m grid.
 const VERT_BODY = /* glsl */ `
 vInfo = aInfo;
 vSpan = aSpan;
@@ -325,13 +331,14 @@ const F = (x: number) => x.toFixed(3);
  * whole windows, uLit of them, warm or cool white, each the same every frame.
  *
  * The chosen block is the warm card, its marked storey in the sun's orange;
- * neighbours known to hold flats are drawn the same in the cooler card, a
- * car park as open decks, and anything else as a plain quiet mass.
+ * neighbours that hold flats are drawn the same in the cooler card, a car
+ * park as open decks, and anything else as a plain quiet mass (drawnAs).
  */
 const FRAG_COLOR = /* glsl */ `
 ${FRAG_CLIP}
 float blkKind = floor(vInfo.w + 0.001);
-float blkSeed = fract(vInfo.w + 0.001);
+// The run's own number, whole, so the rounding of a varying cannot change a hash from one pixel to the next.
+float blkSeed = floor(fract(vInfo.w) * 512.0);
 bool blkMain = vInfo.x > 0.5;
 float blkY = vSite.y;
 float blkPx = max(fwidth(blkY), 2e-3);
@@ -357,18 +364,18 @@ if (blkKind < 0.5 || (blkKind > 3.5 && blkKind < 4.5)) {
   float blkH = blkT < 0.0 ? blkY : blkT - (blkSt - 2.0) * ${S};
   float blkUp = blkT < 0.0 ? 0.0 : 1.0;
   // Bays about three metres wide, fitted to the run so a pier stands at each corner.
-  float blkBays = max(1.0, floor(blkLen / ${F(BAY)} + 0.5));
+  float blkBays = max(1.0, floor(vSpan.x + 0.5));
   float blkBw = blkLen / blkBays;
   float blkBi = clamp(floor(blkU / blkBw), 0.0, blkBays - 1.0);
   float blkBx = blkU - blkBi * blkBw;
   float blkMid = 0.5 * blkBw;
   // How far the bays have shrunk toward a pixel: their differences give way to their average.
   float blkFar = smoothstep(0.3, 0.8, max(blkPu / blkBw, blkPx / ${S}));
-  // A strip of glazing broken by narrow piers, each stack of bays the same all the way up.
-  float blkFull = max(0.0, blkMid - 0.15);
+  // A strip of glazing broken by piers half a metre wide, each stack of bays the same all the way up.
+  float blkFull = max(0.0, blkMid - 0.25);
   float blkNarrow = min(0.62, blkFull);
-  float blkMean = blkBlank || blkLen < 1.9 ? 0.0 : (1.4 * blkFull + 0.36 * blkNarrow) / blkBw;
-  float blkStack = blkHash(vec2(blkBi + 3.0, blkSeed * 197.0 + 1.0));
+  float blkMean = blkBlank ? 0.0 : (1.4 * blkFull + 0.36 * blkNarrow) / blkBw;
+  float blkStack = blkHash(vec2(blkBi + 3.0, blkSeed + 1.0));
   float blkHalf = blkMean <= 0.0 ? 0.0 : blkStack < 0.7 ? blkFull : blkStack < 0.88 ? blkNarrow : 0.0;
   blkHalf = mix(blkHalf, 0.5 * blkMean * blkBw, smoothstep(0.25, 0.6, blkPu / blkBw));
   // Frames, mullions and sills are drawn only while they are a few pixels wide; further off, plain glass.
@@ -378,15 +385,16 @@ if (blkKind < 0.5 || (blkKind > 3.5 && blkKind < 4.5)) {
   vec3 blkV = normalize(cameraPosition - vBlkWorld);
   float blkVn = dot(blkV, blkN);
   vec2 blkPar = blkVn > 0.1 ? -0.12 * blkFine * vec2(dot(blkV, vec3(blkN.z, 0.0, -blkN.x)), blkV.y) / blkVn : vec2(0.0);
-  float blkOx = blkCover(blkBx, blkPu, blkMid - blkHalf, blkMid + blkHalf, blkBw, 0.15, blkMean);
+  float blkOx = blkCover(blkBx, blkPu, blkMid - blkHalf, blkMid + blkHalf, blkBw, 0.25, blkMean);
   float blkOpen = blkOx * blkUp * blkTrain(blkT, blkPx, ${F(SILL)}, ${F(HEAD)}, ${S});
   float blkGu = blkBx + blkPar.x;
   float blkGt = blkT + blkPar.y;
-  float blkGx = blkCover(blkGu, blkPu, blkMid - blkHalf + 0.05, blkMid + blkHalf - 0.05, blkBw, 0.15, blkMean * 0.95);
-  float blkThird = blkHalf > 0.8 ? blkHalf * 0.6667 : blkHalf;
+  float blkGx = blkCover(blkGu, blkPu, blkMid - blkHalf + 0.05, blkMid + blkHalf - 0.05, blkBw, 0.25, blkMean * 0.95);
+  // Three lights to a full window, two to a narrow one. (Thresholds off the 0.05 m steps a half width comes in.)
+  float blkThird = blkHalf > 0.82 ? blkHalf * 0.6667 : blkHalf;
   float blkM = blkMid - blkHalf + blkThird;
-  float blkMull = blkHalf > 0.1 ? blkCover(blkGu, blkPu, blkM - 0.03, blkM + 0.03, blkBw, 0.15, 0.0) : 0.0;
-  if (blkHalf > 0.8) blkMull += blkCover(blkGu, blkPu, blkM + blkThird - 0.03, blkM + blkThird + 0.03, blkBw, 0.15, 0.0);
+  float blkMull = blkHalf > 0.11 ? blkCover(blkGu, blkPu, blkM - 0.03, blkM + 0.03, blkBw, 0.25, 0.0) : 0.0;
+  if (blkHalf > 0.82) blkMull += blkCover(blkGu, blkPu, blkM + blkThird - 0.03, blkM + blkThird + 0.03, blkBw, 0.25, 0.0);
   float blkGlass = min(max(blkGx - blkMull, 0.0) * blkUp * blkTrain(blkGt, blkPx, ${F(SILL + 0.05)}, ${F(HEAD - 0.05)}, ${S}), blkOpen);
   blkGlass = mix(blkOpen, blkGlass, blkFine);
   // Whatever else the line of sight meets in the opening: the frame, or the side of the opening.
@@ -406,7 +414,7 @@ if (blkKind < 0.5 || (blkKind > 3.5 && blkKind < 4.5)) {
   float blkSill = blkUp * blkFine * blkOx * blkTrain(blkT, blkPx, ${F(SILL - 0.05)}, ${F(SILL)}, ${S});
   // The void deck: open between columns about two bays apart, its inside lost in shade.
   float blkDeck = 0.0;
-  if (blkUp < 0.5 && blkLen > 1.9) {
+  if (blkUp < 0.5 && vSpan.y > 0.5) {
     float blkCs = blkLen / max(1.0, floor(blkBays * 0.5));
     float blkCol = blkCover(mod(blkU + 0.5 * blkCs, blkCs), blkPu, 0.5 * blkCs - 0.32, 0.5 * blkCs + 0.32, blkCs, 0.5 * blkCs - 0.4, 0.64 / blkCs);
     blkDeck = (1.0 - blkCol) * blkCover(blkY, blkPx, 0.0, ${F(DECK)}, ${G}, 0.6, ${F(DECK / GROUND)});
@@ -414,7 +422,7 @@ if (blkKind < 0.5 || (blkKind > 3.5 && blkKind < 4.5)) {
   float blkGk = blkMain ? 1.0 : 0.72;
   blkC = mix(blkC, blkCard * 1.05, 0.5 * blkSill);
   blkC = mix(blkC, blkCard * 0.8, blkFrame * blkGk);
-  blkC = mix(blkC, blkCard * vec3(0.3, 0.33, 0.37), blkGlass * blkGk);
+  blkC = mix(blkC, blkCard * vec3(0.36, 0.39, 0.43), blkGlass * blkGk);
   blkC = mix(blkC, blkCard * 0.74, 0.45 * blkSoft);
   blkC = mix(blkC, blkCard * 0.4, blkSlab * (blkMain ? 0.85 : 0.55));
   blkC = mix(blkC, blkCard * mix(0.36, 0.22, smoothstep(0.4, ${F(DECK)}, blkY)), blkDeck);
@@ -435,16 +443,16 @@ if (blkKind < 0.5 || (blkKind > 3.5 && blkKind < 4.5)) {
   blkE += uFog.rgb * blkFres * blkGlass * blkGk * (1.0 - 0.6 * blkHead) * (1.0 - blkBand);
   if (uNight > 0.001) {
     // A flat's light, its own and the same every frame: on in uLit of them, warm or cool, brighter or dimmer.
-    float blkR = blkHash(vec2(blkSt * 1.31 + blkSeed * 61.0, blkBi + 11.0));
+    float blkR = blkHash(vec2(blkSt + blkSeed * 7.0, blkBi + blkSeed * 13.0 + 11.0));
     float blkOn = step(blkR, uLit);
-    float blkTone = blkHash(vec2(blkBi * 0.83 + blkSeed * 23.0, blkSt + 5.0));
+    float blkTone = blkHash(vec2(blkBi + blkSeed * 5.0 + 71.0, blkSt + 137.0));
     vec3 blkLamp = mix((blkTone < 0.55 ? blkWarm : blkCool) * (0.62 + 0.38 * fract(blkR * 37.0)), mix(blkWarm, blkCool, 0.45) * 0.81, blkFar);
     float blkCeil = 0.82 + 0.18 * smoothstep(${F(SILL)}, ${F(HEAD)}, blkGh);
     // A lit window spills a little light onto the wall round it, and the window below onto the spandrel over it.
     vec2 blkD = vec2(max(abs(blkBx - blkMid) - blkHalf, 0.0), max(max(${F(SILL)} - blkH, blkH - ${F(HEAD)}), 0.0));
-    float blkSpill = blkHalf > 0.1 ? blkOn * exp(-5.0 * length(blkD)) : 0.0;
-    if (blkHalf > 0.1 && blkH < ${F(SILL)} && blkSt > 2.5) {
-      float blkRb = blkHash(vec2((blkSt - 1.0) * 1.31 + blkSeed * 61.0, blkBi + 11.0));
+    float blkSpill = blkHalf > 0.11 ? blkOn * exp(-5.0 * length(blkD)) : 0.0;
+    if (blkHalf > 0.11 && blkH < ${F(SILL)} && blkSt > 2.5) {
+      float blkRb = blkHash(vec2(blkSt - 1.0 + blkSeed * 7.0, blkBi + blkSeed * 13.0 + 11.0));
       blkSpill += step(blkRb, uLit) * exp(-5.0 * length(vec2(blkD.x, blkH + ${F(STOREY - HEAD)})));
     }
     blkSpill = mix(blkSpill * (1.0 - blkOpen), 0.06 * uLit, blkFar);
@@ -460,7 +468,7 @@ if (blkKind < 0.5 || (blkKind > 3.5 && blkKind < 4.5)) {
   float blkU = vInfo.y;
   float blkLen = vInfo.z;
   float blkPu = max(fwidth(blkU), 2e-3);
-  float blkCs = blkLen / max(1.0, floor(blkLen / 8.0 + 0.5));
+  float blkCs = blkLen / max(1.0, floor(vSpan.x + 0.5));
   float blkCol = blkCover(mod(blkU + 0.5 * blkCs, blkCs), blkPu, 0.5 * blkCs - 0.3, 0.5 * blkCs + 0.3, blkCs, 0.5 * blkCs - 0.4, 0.6 / blkCs);
   float blkOpen = (1.0 - blkCol) * blkTrain(blkY, blkPx, 1.05, blkPitch - 0.3, blkPitch);
   blkC = mix(blkC, blkCard * 0.26, blkOpen);
@@ -615,9 +623,11 @@ function groundMaterial(u: SiteUniforms, ao: THREE.Texture, rect: THREE.Vector4,
     ).replace(
       '#include <color_fragment>',
       /* glsl */ `#include <color_fragment>
-// The map's ink, over the card where the map is in and fading in; the card itself elsewhere.
-vec4 blkInk = blkMap(vSite.xz);
-diffuseColor.rgb *= blkInk.rgb + (1.0 - blkInk.a);
+// OneMap's map printed on the card where it is in and fading in; the card itself elsewhere.
+vec3 blkGlow;
+vec4 blkPrint = blkMap(vSite.xz, diffuseColor.rgb, blkGlow);
+diffuseColor.rgb = blkPrint.rgb + diffuseColor.rgb * (1.0 - blkPrint.a);
+totalEmissiveRadiance += blkGlow;
 diffuseColor.rgb *= 1.0 - uContact * texture2D(uAo, (vSite.xz - uAoRect.xy) / uAoRect.zw).r;
 diffuseColor.a *= (1.0 - smoothstep(uRim.x, uRim.y, length(vSite.xz))) * uGround;
 `
@@ -808,14 +818,30 @@ function knownKinds(block: Block): Record<string, BuildingKind> {
 }
 
 /**
- * How a neighbour is drawn: with flats only where HDB's records say it holds
- * them, or where it was built with the chosen block; a car park as open
- * decks; anything else, known or not, as a plain mass.
+ * A block of flats in plan, for a neighbour HDB's records have not been read
+ * for yet: at least this large, m², and nowhere deeper than this from a wall,
+ * metres. Four in five HDB buildings hold flats. Of the neighbours of four
+ * estates whose records were read (November 2026), all 24 blocks of flats
+ * were over 500 m² and at most 10.4 m deep, every car park was 15 m deep or
+ * more, and the pavilions were under 250 m².
  */
-function drawnAs(n: Neighbour, spec: BlockSite, kinds: Record<string, BuildingKind>): 'flats' | 'carpark' | 'plain' {
+const FLATS_AREA = 450;
+const FLATS_DEPTH = 11;
+
+/**
+ * How a neighbour is drawn. Where HDB's records say what it is: flats, a car
+ * park's open decks, or, for anything else, a plain mass. Where they have not
+ * been read, the engine already takes it for a typical block of flats in
+ * height, and draws it as one only if it was built with the chosen block or
+ * has the plan of one (`depth` is how far its deepest point is from a wall);
+ * otherwise it stays a plain mass until its record says more.
+ */
+function drawnAs(n: Neighbour, spec: BlockSite, kinds: Record<string, BuildingKind>, depth: number): 'flats' | 'carpark' | 'plain' {
   const kind = kinds[n.postal];
-  if (kind === 'residential' || (kind === undefined && sibling(n, spec))) return 'flats';
-  return kind === 'carpark' ? 'carpark' : 'plain';
+  if (kind === 'residential') return 'flats';
+  if (kind === 'carpark') return 'carpark';
+  if (kind !== undefined) return 'plain';
+  return sibling(n, spec) || (n.footprint.area >= FLATS_AREA && depth <= FLATS_DEPTH) ? 'flats' : 'plain';
 }
 
 /**
@@ -929,6 +955,15 @@ function wallRuns(r: Ring, blank: (p: XY, q: XY) => boolean): WallRun[] {
   return runs;
 }
 
+/** A run shorter than this, metres, is a pier or a return: too short for a window, or for an opening at the void deck. */
+const SHORT_RUN = 1.9;
+
+/** Whether a run of a block of flats has windows. */
+const windowed = (run: WallRun): boolean => !run.blank && run.len >= SHORT_RUN;
+
+/** A run of flats in aSpan: its bays, fitted to it at about BAY wide, and whether its ground storey is open. */
+const flatsSpan = (run: WallRun): [number, number] => [Math.max(1, Math.floor(run.len / BAY + 0.5)), run.len >= SHORT_RUN ? 1 : 0];
+
 /** Walls across the ends of a block's long axis narrower than two bays stay blank, as a block's end walls are. */
 function blankEnds(runs: WallRun[], outer: Ring): void {
   const [ax, ay] = principal(outer);
@@ -948,13 +983,12 @@ function blankEnds(runs: WallRun[], outer: Ring): void {
 
 /**
  * One plant room on a roof, the lift motor room or water tank every block
- * has, where the footprint is deepest and turned to its long axis, so it is
- * set back from every edge. Its height, or 0 where the footprint is too
- * slight to take one. Where the lifts really are is not known, so it says
- * nothing about them.
+ * has, at `core`, the footprint's deepest point, and turned to its long
+ * axis, so it is set back from every edge. Its height, or 0 where the
+ * footprint is too slight to take one. Where the lifts really are is not
+ * known, so it says nothing about them.
  */
-function roofBox(solid: Solid, parts: Part[], roof: number, storey: number, samples: number): number {
-  const core = deepest(parts, samples);
+function roofBox(solid: Solid, parts: Part[], roof: number, storey: number, core: { x: number; y: number; d: number }): number {
   if (core.d <= 2) return 0;
   const [ax, ay] = principal(parts[0].outer);
   const hu = Math.min(3.4, core.d * 0.8);
@@ -1186,9 +1220,10 @@ export function buildSite(spec: BlockSite, coarse: boolean, onRepaint: () => voi
   const painted = numberWalls(parts, list);
   const blank = (p: XY, q: XY) => painted.some((w) => w.a === p && w.b === q);
 
-  // A fraction that varies run to run, so no two walls lay out their stacks and lights alike. The same every build.
+  // A whole number of 512ths below 1 that varies run to run, so no two walls lay out their stacks and lights alike.
+  // The same every build.
   let seed = 0;
-  const nextSeed = () => 0.9 * Math.abs((Math.sin(++seed * 12.9898) * 43758.5453) % 1);
+  const nextSeed = () => (Math.floor(500 * Math.abs((Math.sin(++seed * 12.9898) * 43758.5453) % 1)) + 0.5) / 512;
   // Building on the left, view on the right: the outward normal of (dx, dy) is (dy, -dx), and z is south.
   const normalOf = (e: WallEdge) => new THREE.Vector3((e.q[1] - e.p[1]) / e.len, 0, (e.q[0] - e.p[0]) / e.len);
   // A parapet is a skin: its inner face is the same wall seen from the roof.
@@ -1206,13 +1241,14 @@ export function buildSite(spec: BlockSite, coarse: boolean, onRepaint: () => voi
       if (pi === 0 && ri === 0) blankEnds(runs, r);
       for (const run of runs) {
         // Kind 0 (a wall of flats) or 4 (a blank one), plus the run's own fraction.
-        const wall = (run.blank ? 4 : 0) + nextSeed();
+        const wall = (windowed(run) ? 0 : 4) + nextSeed();
+        const span = flatsSpan(run);
         for (const e of run.edges) {
           const n = normalOf(e);
           for (let k = 1; k <= S; k++) {
             const y0 = floorY(k);
             const y1 = k === S ? top : floorY(k + 1);
-            solid.quad(site(e.p, y0), site(e.q, y0), site(e.q, y1), site(e.p, y1), n, k, e.u0, e.u0 + e.len, run.len, wall);
+            solid.quad(site(e.p, y0), site(e.q, y0), site(e.q, y1), site(e.p, y1), n, k, e.u0, e.u0 + e.len, run.len, wall, span);
           }
           parapet(e, n, S, run.len, top);
         }
@@ -1221,9 +1257,9 @@ export function buildSite(spec: BlockSite, coarse: boolean, onRepaint: () => voi
   );
   const tris = parts.map(triangulate);
   for (const t of tris) solid.cap(t, top, true, S);
-  const plantH = roofBox(solid, parts, top, S, 40);
+  const plantH = roofBox(solid, parts, top, S, deepest(parts));
 
-  // ── Neighbours, each as what it is known to be: flats, a car park's open decks, or a plain mass.
+  // ── Neighbours, each as what it is: flats, a car park's open decks, or a plain mass.
   const kinds = spec.neighbourKinds ?? knownKinds(block);
   let neighbourTop = 0;
   const outlines: Part[][] = [parts];
@@ -1232,18 +1268,21 @@ export function buildSite(spec: BlockSite, coarse: boolean, onRepaint: () => voi
   for (const nb of block.neighbours) {
     const storeys = neighbourStoreys(nb, spec);
     const h = roofY(storeys);
-    const drawn = drawnAs(nb, spec, kinds);
+    const core = deepest(nb.footprint.parts, 20);
+    const drawn = drawnAs(nb, spec, kinds, core.d);
     const rim = drawn === 'plain' ? 0 : PARAPET;
     const ends = drawn === 'flats' ? numberWalls(nb.footprint.parts, facades(nb.footprint)) : [];
     const endWall = (p: XY, q: XY) => ends.some((w) => w.a === p && w.b === q);
-    // A car park's decks share its height evenly.
-    const span: [number, number] = drawn === 'carpark' ? [0, h / Math.max(1, storeys)] : [0, 0];
+    // A car park's decks share its height evenly, and its columns stand about eight metres apart.
+    const pitch = h / Math.max(1, storeys);
     nb.footprint.parts.forEach((part, pi) =>
       [part.outer, ...part.holes].forEach((r, ri) => {
         const runs = wallRuns(r, endWall);
         if (drawn === 'flats' && pi === 0 && ri === 0) blankEnds(runs, r);
         for (const run of runs) {
-          const wall = (drawn === 'flats' ? (run.blank ? 4 : 0) : drawn === 'carpark' ? 5 : 6) + nextSeed();
+          const wall = (drawn === 'flats' ? (windowed(run) ? 0 : 4) : drawn === 'carpark' ? 5 : 6) + nextSeed();
+          const span: readonly [number, number] =
+            drawn === 'flats' ? flatsSpan(run) : drawn === 'carpark' ? [Math.max(1, Math.floor(run.len / 8 + 0.5)), pitch] : NO_SPAN;
           for (const e of run.edges) {
             const n = normalOf(e);
             solid.quad(site(e.p, 0), site(e.q, 0), site(e.q, h), site(e.p, h), n, -1, e.u0, e.u0 + e.len, run.len, wall, span);
@@ -1254,7 +1293,7 @@ export function buildSite(spec: BlockSite, coarse: boolean, onRepaint: () => voi
       })
     );
     for (const p of nb.footprint.parts) solid.cap(triangulate(p), h, true, -1);
-    const plant = drawn === 'flats' ? roofBox(solid, nb.footprint.parts, h, -1, 14) : 0;
+    const plant = drawn === 'flats' ? roofBox(solid, nb.footprint.parts, h, -1, core) : 0;
     neighbourTop = Math.max(neighbourTop, h + Math.max(rim, plant));
     outlines.push(nb.footprint.parts);
     roofs.push(h + rim);

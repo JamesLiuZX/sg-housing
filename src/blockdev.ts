@@ -16,6 +16,7 @@
  *   ?inset=150        reserves room at the bottom, as the interface's controls do
  *   ?view=unit        turns the block to show the flat's side
  *   ?walk=living      once in the flat, stands in a room looking at its window (?walk=1 at the front door), with no flight in
+ *   ?ground=aerial    what the site stands on: map (OneMap's drawn map, the default), aerial (its photograph) or paper
  *   ?heights=1        first asks OneMap and data.gov.sg for the neighbours' heights and kinds, as the app does once a block
  *                     is shown (for up to 20 s); without it the block is built with what this device knows, as the app first is
  *
@@ -80,6 +81,8 @@ function setTime(m: number, month = date.month): void {
   viewer.setSun(sunAt(d, m));
 }
 setTime(minutes);
+const ground = q.get('ground');
+if (ground === 'paper' || ground === 'aerial' || ground === 'map') viewer.setGround(ground);
 
 /** Stands the flat on the side looking closest to `bearing`, turning it to face that side. */
 function place(bearing: number, along = 0.5): void {
