@@ -2722,9 +2722,10 @@ export class Viewer {
       this.fitShadow(lights.sun, true);
       this.renderer.shadowMap.needsUpdate = true;
     }
-    const bounds = this.lightBounds();
+    const bounds = this.domeBounds();
     s.renderDome(this.scene, lights.dome, bounds.pts, bounds.reach);
-    const site = this.site;
+    // The site's baked contact shading gives way only where the dome's map covers the site: on the stage, not out of a window.
+    const site = this.site && this.siteW > 0.5 ? this.site : null;
     const contact = site ? site.u.uContact.value : 0;
     this.u.uBaked.value = 0;
     if (site) site.u.uContact.value = 0;
@@ -2737,8 +2738,8 @@ export class Viewer {
     s.show();
   }
 
-  /** What the lights' shadow maps are fitted round, world: the flat, or on the stage the site; and the tallest thing in it. */
-  private lightBounds(): { pts: THREE.Vector3[]; reach: number } {
+  /** What the dome's shadow map is fitted round, world: the flat, or on the stage the site; and the tallest thing in it. */
+  private domeBounds(): { pts: THREE.Vector3[]; reach: number } {
     const pts: THREE.Vector3[] = [];
     const site = this.site && this.siteW > 0.5 ? this.site : null;
     if (site) {

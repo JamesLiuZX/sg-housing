@@ -702,8 +702,9 @@ export class Settle {
 
   /** Bytes held for settling at the canvas's current size, for the stats. */
   memory(): number {
-    const px = this.size.x * this.size.y;
-    return px * (4 + 4 + (this.half ? 8 : 8)) + DOME_SIZE * DOME_SIZE * 8;
+    // Per pixel: the fast frame and the sample, eight bits each, and the mean, in half float or twice eight bits.
+    // The dome's map: packed depth and a depth texture.
+    return this.size.x * this.size.y * (4 + 4 + 8) + DOME_SIZE * DOME_SIZE * 8;
   }
 
   /** After the context was lost: the buffers are recreated when next used. */

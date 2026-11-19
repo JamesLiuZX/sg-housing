@@ -12,7 +12,7 @@
  *
  * Settling: once still, the picture refines itself into a properly lit render over about a second
  * (48 samples on a desktop pointer, 32 on a coarse one, fewer on a slow device). ?samples=16 fixes the
- * count, as headless Chromium on a software renderer wants (it draws about a frame a second);
+ * count, as headless Chromium on a software renderer wants (it draws a frame every few tenths of a second);
  * ?quality=fast keeps the single fast pass. `await blk.settled()` waits for the settled picture.
  *
  * The plan is validated on load and every issue goes to the console, so a layout
