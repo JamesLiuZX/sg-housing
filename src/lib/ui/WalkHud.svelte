@@ -3,6 +3,7 @@
   import { fade, fly } from 'svelte/transition';
   import type { Viewer } from '../engine/Viewer';
   import { boundsOf, frameOf, openingsOf, pointInPoly } from '../plan/geometry';
+  import MapCredit from './MapCredit.svelte';
   import { ms } from './motion';
   import { roomView } from './pins';
   import RoomStrip from './RoomStrip.svelte';
@@ -133,6 +134,8 @@
     </button>
     <!-- The standing disclosure takes over at once from the one the overview had; only the way out waits for the flight. -->
     <p class="disclose" in:fade={{ duration: ms(200) }} out:fade={{ duration: ms(160) }}>Computer-generated model, not a photograph</p>
+    <!-- OneMap's map lies on the ground below the windows. -->
+    <div class="credit"><MapCredit shown={session.mapShown} /></div>
   </div>
 
   <figure class="map glass" data-avoid aria-label={room ? `Plan of the flat. You are in ${where}.` : 'Plan of the flat'} in:fly={{ y: -10, duration: ms(420), delay: ms(680) }} out:fade={{ duration: ms(160) }}>
@@ -231,6 +234,11 @@
     text-shadow:
       0 0 3px var(--surface),
       0 0 8px var(--surface);
+  }
+
+  /* Clear of the map, as the disclosure is; it wraps at its bar. */
+  .credit {
+    max-width: calc(100vw - 2 * var(--gutter) - 128px - 20px);
   }
 
   .map {

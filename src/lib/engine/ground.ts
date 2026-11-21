@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { TILE_PX, bundledMap, coverSquare, loadTiles, rangeBounds, tileUrl, tilesIn, type BundledMap, type MapStyle, type TileImage, type TileRange } from '../data/tiles';
+import { TILE_PX, bundledMap, coverSquare, loadTiles, rangeBounds, rectBounds, tileUrl, tilesIn, type BundledMap, type MapStyle, type TileImage, type TileRange } from '../data/tiles';
 import type { Block, Bounds } from '../data/types';
 import { clamp } from './tween';
 
@@ -32,13 +32,18 @@ import { clamp } from './tween';
  * up, its Night drawing is fetched and crossfaded in, and back again at dawn.
  *
  * Alignment: the tiles are placed through the same projection the
- * footprints use (see src/lib/data/tiles.ts). Measured on seven blocks
- * across Singapore, in the tiles and again in this scene seen from above,
- * HDB's footprints sit on OneMap's own outlines within a few centimetres
- * wherever both draw the same wall.
+ * footprints use (see src/lib/data/tiles.ts). Measured in the tiles on seven
+ * blocks across Singapore, HDB's footprints sit on OneMap's own outlines to
+ * within 7 cm on six and 19 cm on the seventh; measured again in this scene
+ * seen from above, at Clementi, Tampines and Woodlands, to within 4 cm, with
+ * no turn to speak of (under a fifth of a degree).
  */
 
-/** What the site stands on: the plain paper table, OneMap's drawn map, or its aerial photograph. */
+/**
+ * What the site stands on: the plain paper table, OneMap's drawn map, or its
+ * aerial photograph. The photograph is for evaluation only: OneMap does not
+ * publish it as a base map for others to use (see MAX_ZOOM in tiles.ts).
+ */
 export type GroundKind = 'paper' | 'map' | 'aerial';
 
 /** How a drawing is printed: the Grey map's ink, the Night map's, or a photograph. */
@@ -90,7 +95,8 @@ const UPLOAD_GAP = 0.15;
 const INK_DAY = 0.62;
 const TINT_DAY = 0.3;
 const INK_NIGHT = 0.8;
-const TINT_NIGHT = 0.6;
+/** The Night drawing's blue roads and green railways are a key to the map, not the colour of the city at night: most of it goes. */
+const TINT_NIGHT = 0.35;
 const GLOW_NIGHT = 0.4;
 /** The photograph: how fully it replaces the card, how much of its colour is kept, and its gain and lift toward the card's lightness. */
 const PHOTO_OVER = 0.9;
@@ -337,7 +343,7 @@ export class MapGround {
       if (!found || this.disposed || i < 0) return;
       const f = this.fields[i];
       f.bundle = found;
-      f.bounds = rangeBounds(block, found.range);
+      f.bounds = rectBounds(block, found.rect);
       this.place(f, i);
       f.wanted = true;
       if (this.started) this.want(f);
@@ -614,9 +620,9 @@ export class MapGround {
     if (fades || busy) this.raf = requestAnimationFrame(this.step);
   };
 
-  /** Tells the interface whether any of OneMap's map is on the table, for its attribution. */
+  /** Tells the interface whether any of OneMap's map is on the table, for its attribution: until the last of it has faded out. */
   private report(): void {
-    const shown = this.on > 0 && this.kind !== 'paper' && this.fields.some((f) => f.a.fade.some((v) => v > 0) || f.b.fade.some((v) => v > 0));
+    const shown = this.on > 0 && this.fields.some((f) => f.a.fade.some((v) => v > 0) || f.b.fade.some((v) => v > 0));
     if (shown === this.shown) return;
     this.shown = shown;
     this.opts.onShown?.(shown);

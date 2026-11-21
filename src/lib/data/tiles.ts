@@ -10,7 +10,12 @@
  * Everything here lands in a block's own frame (metres east and north of its
  * centroid) through `toBlockFrame`, the same projection the footprints use,
  * so the map and the model agree. Measured against OneMap's drawn building
- * outlines, HDB's footprints placed this way sit within a few centimetres.
+ * outlines in the tiles, on seven blocks across Singapore (Clementi,
+ * Tampines, Woodlands, Bedok, Pasir Ris, Jurong West, Ang Mo Kio), HDB's
+ * footprints placed this way sit within 7 cm of them on six and 19 cm on the
+ * seventh, whose two outlines differ a little in shape. Measured again in the
+ * scene seen from above, on the first three, they sit within 4 cm, turned by
+ * no more than a fifth of a degree.
  *
  * One thing to know about the projection: EPSG:3857 puts WGS84 latitude and
  * longitude on a sphere. On the ground, which is the ellipsoid, a pixel at
@@ -30,16 +35,20 @@ import type { Block, Bounds, XY } from './types';
 export const TILE_PX = 256;
 
 /**
- * The highest zoom each of OneMap's styles serves, as probed on 18 November
- * 2026 at Clementi: one zoom further answers 200 with an empty body.
+ * The highest zoom each of OneMap's styles serves, as probed on 18 and again
+ * on 19 November 2026 at Clementi: one zoom further answers 200 with an empty
+ * body.
  * OneMap's TileJSON gives 11 as the lowest. An `_HD` tile at zoom z is drawn
  * with the line weights and lettering of zoom z - 1 at twice the detail,
  * which is how OneMap's TileJSON serves its maps to high-density screens.
  *
- * `Satellite` is the aerial photograph ("Orthophoto" on OneMap's own site),
- * served as JPEG from the same address. OneMap's developer pages list the
- * drawn maps only, so the photograph is used on the same terms and with the
- * same attribution, and is the one style to confirm with SLA before launch.
+ * `Satellite` is the aerial photograph, served from the same address. It is
+ * not one of the base maps OneMap publishes for developers: its developer
+ * pages (https://www.onemap.gov.sg/docs/maps/), TileJSON and WMTS list
+ * Default, Original, Grey, GreyLite, Night and LandLot only, and its API terms
+ * ask for use "in accordance to the Agency's published technical and other
+ * specifications". So the interface does not offer it; the engine can still
+ * draw it (block.html?ground=aerial) for the day SLA says it may be used.
  */
 export const MAX_ZOOM = {
   Default: 19,
@@ -73,6 +82,15 @@ export interface TileRange {
   y0: number;
   x1: number;
   y1: number;
+}
+
+/** A rectangle of the world at one zoom, in world pixels from its north-west corner: x from px0 to px1, y from py0 to py1. */
+export interface PixelRect {
+  z: number;
+  px0: number;
+  py0: number;
+  px1: number;
+  py1: number;
 }
 
 /** Pixels across the whole world at zoom z. */
@@ -136,17 +154,27 @@ export function frameToPixel(block: Pick<Block, 'lat' | 'lng'>, x: number, y: nu
   return toWorldPixel(lat, lng, z);
 }
 
+/** The world pixels a range of tiles covers. */
+export function rangeRect(r: TileRange): PixelRect {
+  return { z: r.z, px0: r.x0 * TILE_PX, py0: r.y0 * TILE_PX, px1: r.x1 * TILE_PX, py1: r.y1 * TILE_PX };
+}
+
 /**
- * The outer edges of a tile range in the block's frame, metres: what a
- * texture of the range spans when it is laid on the ground. East to west the
- * mapping between the texture and the ground is exactly linear; north to
+ * The edges of a rectangle of world pixels in the block's frame, metres: what
+ * a picture of it spans when it is laid on the ground. East to west the
+ * mapping between the picture and the ground is exactly linear; north to
  * south it is linear to within a few millimetres over a few kilometres (see
- * the tests), so a texture laid on this rectangle lands where the tiles say.
+ * the tests), so a picture laid on this rectangle lands where the map says.
  */
-export function rangeBounds(block: Pick<Block, 'lat' | 'lng'>, r: TileRange): Bounds {
-  const [minX, maxY] = pixelToFrame(block, r.x0 * TILE_PX, r.y0 * TILE_PX, r.z);
-  const [maxX, minY] = pixelToFrame(block, r.x1 * TILE_PX, r.y1 * TILE_PX, r.z);
+export function rectBounds(block: Pick<Block, 'lat' | 'lng'>, r: PixelRect): Bounds {
+  const [minX, maxY] = pixelToFrame(block, r.px0, r.py0, r.z);
+  const [maxX, minY] = pixelToFrame(block, r.px1, r.py1, r.z);
   return { minX, minY, maxX, maxY };
+}
+
+/** The outer edges of a tile range in the block's frame, metres: what a texture of the range spans on the ground. */
+export function rangeBounds(block: Pick<Block, 'lat' | 'lng'>, r: TileRange): Bounds {
+  return rectBounds(block, rangeRect(r));
 }
 
 // ── Loading ─────────────────────────────────────────────────────────────────
@@ -336,10 +364,10 @@ export function clearTiles(): void {
 
 // ── The bundled map ─────────────────────────────────────────────────────────
 
-/** A map that came with the app, for a block that must look right with no network: one picture of a whole tile range. */
+/** A map that came with the app, for a block that must look right with no network: one picture of a rectangle of the world. */
 export interface BundledMap {
-  /** The tiles the picture is a mosaic of, edge to edge. */
-  range: TileRange;
+  /** The world pixels the picture shows, edge to edge, at the zoom its tiles were drawn for. */
+  rect: PixelRect;
   /** The picture, by day or after dark; null if it cannot be decoded. */
   image(night: boolean): Promise<TileImage | null>;
 }
@@ -360,7 +388,7 @@ export async function bundledMap(postal: string): Promise<BundledMap | null> {
       for (let i = 0; i < text.length; i++) bytes[i] = text.charCodeAt(i);
       return decode(new Blob([bytes], { type: DEMO_GROUND.type }));
     };
-    return { range: DEMO_GROUND.range, image: (night) => picture(night ? DEMO_GROUND.night : DEMO_GROUND.day) };
+    return { rect: DEMO_GROUND.rect, image: (night) => picture(night ? DEMO_GROUND.night : DEMO_GROUND.day) };
   } catch {
     return null;
   }

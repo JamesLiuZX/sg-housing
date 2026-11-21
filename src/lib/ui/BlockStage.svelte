@@ -1,6 +1,7 @@
 <script lang="ts">
   import BlockOutline from './BlockOutline.svelte';
   import FlatChooser from './FlatChooser.svelte';
+  import MapCredit from './MapCredit.svelte';
   import { facingWords, factsLine, roadName, storeyTag } from './place';
   import type { Session } from './session.svelte';
   import StoreyReadout from './StoreyReadout.svelte';
@@ -48,6 +49,7 @@
   const facts = $derived(factsLine(session.facts));
   const source = $derived(session.facts?.source ?? null);
   const faces = $derived(session.facade ? facingWords(session.facade.bearing) : null);
+  const mapOn = $derived(session.ground === 'map');
 
   let panel = $state<HTMLElement>();
   let panelW = $state(0);
@@ -101,7 +103,24 @@
   </div>
 {/snippet}
 
+{#snippet ground()}
+  <!-- OneMap's map under the block: the switch for it, and its attribution while it is on the table, on the ground's own corner. -->
+  <div class="ground" style:bottom="{bottom + 10}px" style:left={wide ? `${left + 24}px` : null} data-avoid>
+    <button class="maponoff glass" class:on={mapOn} aria-pressed={mapOn} onclick={() => (session.ground = mapOn ? 'paper' : 'map')}>
+      <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
+        <path class="sheet-of" d="M2.5 4.6 6.5 3l5 1.6 4-1.6v10.4l-4 1.6-5-1.6-4 1.6Z" />
+        <path d="M6.5 3v10.4M11.5 4.6V15" />
+        <path class="off" d="M2.6 15.4 15.4 2.6" />
+      </svg>
+      Map
+    </button>
+    <!-- Its line is kept while the map is away, so the switch never moves under the finger that pressed it. -->
+    <div class="credit"><MapCredit shown={session.mapShown} /></div>
+  </div>
+{/snippet}
+
 <div class="bs" class:wide class:leaving>
+  {@render ground()}
   {#if wide}
     <section class="panel" bind:this={panel} bind:clientWidth={panelW} data-avoid>
       {@render who(true)}
@@ -329,6 +348,74 @@
       opacity: 0;
       transform: translateX(18px);
     }
+  }
+
+  /* ── OneMap's map: its switch and its attribution, at the foot of the stage on the left, on the ground they speak for ── */
+  .bs > .ground {
+    position: absolute;
+    left: calc(var(--gutter) + var(--safe-l));
+    /* Clear of the storey scale at the right edge; the attribution wraps at its bar on the narrowest phones. */
+    max-width: calc(100% - 2 * var(--gutter) - 44px);
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    /* Far enough that the reach of the attribution's links stops short of the switch. */
+    gap: 12px;
+    pointer-events: none;
+    animation: rise-in 640ms var(--ease-out) 300ms both;
+  }
+  .ground > * {
+    pointer-events: auto;
+  }
+  .ground > .credit {
+    min-height: 20px;
+    pointer-events: none;
+  }
+  .leaving > .ground {
+    transform: translateY(20px);
+  }
+  .maponoff {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 44px;
+    padding: 0 15px 0 12px;
+    border-radius: 999px;
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--ink-2);
+    transition:
+      transform 180ms var(--ease-out),
+      color 180ms;
+  }
+  .maponoff:active {
+    transform: scale(0.96);
+  }
+  .maponoff.on {
+    color: var(--ink);
+  }
+  .maponoff path {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.4;
+    stroke-linejoin: round;
+    stroke-linecap: round;
+  }
+  .maponoff .sheet-of {
+    fill: transparent;
+    transition: fill 180ms;
+  }
+  .maponoff.on .sheet-of {
+    fill: rgb(var(--ink-rgb) / 0.12);
+  }
+  /* Struck through while the block stands on the plain table. */
+  .maponoff .off {
+    stroke-dasharray: 19 19;
+    stroke-dashoffset: 0;
+    transition: stroke-dashoffset 260ms var(--ease-out);
+  }
+  .maponoff.on .off {
+    stroke-dashoffset: 19;
   }
 
   /* ── The bottom of a phone ── */

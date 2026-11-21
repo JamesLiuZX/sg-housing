@@ -69,6 +69,10 @@ export class Session {
   playing = $state(false);
   /** True once the sky is dark enough that the interface has switched to light on ink. */
   night = $state(false);
+  /** What the block stands on: OneMap's map, or the plain paper table. Kept for every block shown. */
+  ground = $state<'map' | 'paper'>('map');
+  /** True while OneMap's map is in the scene, from the engine's `map` hook; its attribution shows while it is. */
+  mapShown = $state(false);
 
   // ── The place, when the flat came from an address ──
 

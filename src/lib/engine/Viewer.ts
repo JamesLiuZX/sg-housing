@@ -82,6 +82,13 @@ const ARRIVE_TURN = 0.5;
  * the ideal angle 0.5): enough to swing it a few tens of degrees.
  */
 const NUMBER_SEEN = 0.6;
+/**
+ * What it is worth to the arrival view not to read the map's lettering upside
+ * down. OneMap prints its map north up and the map is never turned, so a view
+ * looking anywhere south of east or west reads its names the wrong way up,
+ * looking due south most of all; any view looking north of that is as good.
+ */
+const MAP_UPRIGHT = 0.35;
 /** The sun on the site against the sun in the flat: the blocks are white card far from the camera, and would bleach. */
 const SITE_SUN = 0.45;
 /** Seconds for the view out of the windows to clear once the walk has landed. */
@@ -1573,7 +1580,9 @@ export class Viewer {
   /**
    * What the site stands on: 'map', OneMap's base map printed on the table
    * and the ground below the windows (the default), or 'paper', the plain
-   * table. It fades across, and holds for every block shown after.
+   * table. It fades across, and holds for every block shown after. 'aerial',
+   * OneMap's aerial photograph, is for evaluation only: OneMap does not
+   * publish it as a base map for others to use (see MAX_ZOOM in tiles.ts).
    */
   setGround(kind: GroundKind): void {
     this.groundKind = kind;
@@ -1980,6 +1989,9 @@ export class Viewer {
         pts.push(new THREE.Vector3(x, site.top * f, z));
     const toSite = this.siteMatrix.clone().invert();
     const gap = (a: number) => Math.abs(Math.atan2(Math.sin(a), Math.cos(a)));
+    // The azimuth from which the camera looks due north.
+    const north = this.sitePoint(0, 1, 0).sub(this.sitePoint(0, 0, 0));
+    const upright = Math.atan2(-north.x, -north.z);
     let best = { theta: ideal[0], score: Infinity };
     for (let i = 0; i < 36; i++) {
       const theta = (i / 36) * Math.PI * 2;
@@ -1997,6 +2009,7 @@ export class Viewer {
         }
         score += NUMBER_SEEN * (1 - seen) ** 2;
       }
+      if (number) score += MAP_UPRIGHT * Math.max(0, -Math.cos(theta - upright)) ** 2;
       if (score < best.score) best = { theta, score };
     }
     return best.theta;

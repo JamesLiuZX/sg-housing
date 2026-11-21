@@ -302,6 +302,16 @@ float blkTrain(float x, float w, float a, float b, float c) {
   float r = x - floor(x / c) * c;
   return (blkTrainI(r + 0.5 * w, a, b, c) - blkTrainI(r - 0.5 * w, a, b, c)) / w;
 }
+// After dark, whether the room behind bay b of storey s, on the run with this seed, is lit (1) or not (0), when
+// that share of all rooms are lit. Along a run the bays pair into flats, a stable guess since where one flat ends and the next begins
+// is not known. A flat is home or not as a whole, and in one that is home most rooms are lit, so lights come in
+// households rather than as scattered specks. The same every frame.
+float blkLitRoom(float s, float b, float seed, float share) {
+  float hold = floor((b + mod(seed, 2.0)) * 0.5);
+  float home = blkHash(vec2(s + seed * 7.0, hold + seed * 13.0 + 11.0));
+  float room = blkHash(vec2(b + seed * 3.0 + 29.0, s * 1.7 + 41.0));
+  return step(home, share * 1.22) * step(room, 0.82);
+}
 `;
 
 /** Pieces sinking into the table are cut off at its surface, and the chosen block steps aside for a flat seen from inside. */
@@ -328,11 +338,14 @@ const F = (x: number) => x.toFixed(3);
  * same face settles into clean bands, because every pattern is filtered over
  * the pixel it falls in (blkCover, blkTrain) and gives way to its average
  * as it shrinks, so nothing shimmers. After dark the flats are lit as flats:
- * whole windows, uLit of them, warm or cool white, each the same every frame.
+ * whole windows, uLit of them, home by home (blkLitRoom), warm or cool white,
+ * each the same every frame; the void deck evenly and dimly.
  *
  * The chosen block is the warm card, its marked storey in the sun's orange;
  * neighbours that hold flats are drawn the same in the cooler card, a car
  * park as open decks, and anything else as a plain quiet mass (drawnAs).
+ * Seen from inside a flat the storey is not marked and the neighbours do not
+ * step back: there the site is the view out of the window.
  */
 const FRAG_COLOR = /* glsl */ `
 ${FRAG_CLIP}
@@ -343,14 +356,17 @@ bool blkMain = vInfo.x > 0.5;
 float blkY = vSite.y;
 float blkPx = max(fwidth(blkY), 2e-3);
 const vec3 blkInk = vec3(0.046, 0.05, 0.058);
-// Lamplight after dark: warm white in some flats and cool white in others, as Singapore homes are lit;
-// the common areas, void decks and car parks in cool white.
-const vec3 blkWarm = vec3(1.0, 0.7, 0.42);
+// Lamplight after dark: warm white (about 3000 K) in some homes and cool white (about 6000 K) in more, as
+// Singapore homes are lit; the common areas, void decks and car parks in cool white.
+const vec3 blkWarm = vec3(1.0, 0.68, 0.36);
 const vec3 blkCool = vec3(0.78, 0.86, 1.0);
+// Seen from inside a flat (the box round it is set), the site is the view, not the stage: the storey is not
+// marked, and the neighbours are drawn at full strength instead of stepping back behind the chosen block.
+bool blkStage = uHideMin.x > uHideMax.x;
 vec3 blkC = blkMain ? uCard : uContext;
 vec3 blkCard = blkC;
 vec3 blkE = vec3(0.0);
-if (!blkMain) {
+if (!blkMain && blkStage) {
   blkDirect = 0.78;
   blkSky = 1.22;
 }
@@ -378,40 +394,54 @@ if (blkKind < 0.5 || (blkKind > 3.5 && blkKind < 4.5)) {
   float blkStack = blkHash(vec2(blkBi + 3.0, blkSeed + 1.0));
   float blkHalf = blkMean <= 0.0 ? 0.0 : blkStack < 0.7 ? blkFull : blkStack < 0.88 ? blkNarrow : 0.0;
   blkHalf = mix(blkHalf, 0.5 * blkMean * blkBw, smoothstep(0.25, 0.6, blkPu / blkBw));
-  // Frames, mullions and sills are drawn only while they are a few pixels wide; further off, plain glass.
-  float blkFine = 1.0 - smoothstep(0.025, 0.07, max(blkPu, blkPx));
-  // Up close the line of sight meets the glass a little back in the wall, so a window has depth.
+  // Frames, mullions and sills are drawn while a bay is still tens of pixels wide, each filtered over the pixel
+  // it falls in, so from a window across the way a frame reads even where it is under a pixel; further off, plain glass.
+  float blkFine = 1.0 - smoothstep(0.05, 0.14, max(blkPu, blkPx));
   vec3 blkN = normalize(vBlkNormalW);
   vec3 blkV = normalize(cameraPosition - vBlkWorld);
   float blkVn = dot(blkV, blkN);
-  vec2 blkPar = blkVn > 0.1 ? -0.12 * blkFine * vec2(dot(blkV, vec3(blkN.z, 0.0, -blkN.x)), blkV.y) / blkVn : vec2(0.0);
   float blkOx = blkCover(blkBx, blkPu, blkMid - blkHalf, blkMid + blkHalf, blkBw, 0.25, blkMean);
   float blkOpen = blkOx * blkUp * blkTrain(blkT, blkPx, ${F(SILL)}, ${F(HEAD)}, ${S});
-  float blkGu = blkBx + blkPar.x;
-  float blkGt = blkT + blkPar.y;
-  float blkGx = blkCover(blkGu, blkPu, blkMid - blkHalf + 0.05, blkMid + blkHalf - 0.05, blkBw, 0.25, blkMean * 0.95);
-  // Three lights to a full window, two to a narrow one. (Thresholds off the 0.05 m steps a half width comes in.)
-  float blkThird = blkHalf > 0.82 ? blkHalf * 0.6667 : blkHalf;
-  float blkM = blkMid - blkHalf + blkThird;
-  float blkMull = blkHalf > 0.11 ? blkCover(blkGu, blkPu, blkM - 0.03, blkM + 0.03, blkBw, 0.25, 0.0) : 0.0;
-  if (blkHalf > 0.82) blkMull += blkCover(blkGu, blkPu, blkM + blkThird - 0.03, blkM + blkThird + 0.03, blkBw, 0.25, 0.0);
-  float blkGlass = min(max(blkGx - blkMull, 0.0) * blkUp * blkTrain(blkGt, blkPx, ${F(SILL + 0.05)}, ${F(HEAD - 0.05)}, ${S}), blkOpen);
-  blkGlass = mix(blkOpen, blkGlass, blkFine);
+  // Far off an opening is all glass. The finer work is done only where it can show: close up, as from a window
+  // across the way, and not at the distance the stage is seen from.
+  float blkGlass = blkOpen;
+  float blkGt = blkT;
+  float blkSill = 0.0;
+  if (blkFine > 0.0) {
+    blkSill = blkUp * blkFine * blkOx * blkTrain(blkT, blkPx, ${F(SILL - 0.05)}, ${F(SILL)}, ${S});
+    if (blkOpen > 0.0) {
+      // Up close the line of sight meets the glass a little back in the wall, so a window has depth.
+      vec2 blkPar = blkVn > 0.1 ? -0.12 * blkFine * vec2(dot(blkV, vec3(blkN.z, 0.0, -blkN.x)), blkV.y) / blkVn : vec2(0.0);
+      float blkGu = blkBx + blkPar.x;
+      blkGt = blkT + blkPar.y;
+      float blkGx = blkCover(blkGu, blkPu, blkMid - blkHalf + 0.06, blkMid + blkHalf - 0.06, blkBw, 0.25, blkMean * 0.95);
+      // Three lights to a full window, two to a narrow one. (Thresholds off the 0.05 m steps a half width comes in.)
+      float blkThird = blkHalf > 0.82 ? blkHalf * 0.6667 : blkHalf;
+      float blkM = blkMid - blkHalf + blkThird;
+      float blkMull = blkHalf > 0.11 ? blkCover(blkGu, blkPu, blkM - 0.03, blkM + 0.03, blkBw, 0.25, 0.0) : 0.0;
+      if (blkHalf > 0.82) blkMull += blkCover(blkGu, blkPu, blkM + blkThird - 0.03, blkM + blkThird + 0.03, blkBw, 0.25, 0.0);
+      float blkPane = min(max(blkGx - blkMull, 0.0) * blkUp * blkTrain(blkGt, blkPx, ${F(SILL + 0.06)}, ${F(HEAD - 0.06)}, ${S}), blkOpen);
+      blkGlass = mix(blkOpen, blkPane, blkFine);
+    }
+  }
   // Whatever else the line of sight meets in the opening: the frame, or the side of the opening.
   float blkFrame = max(blkOpen - blkGlass, 0.0);
   // A soft shadow under each window's head; with the sun on the face, as long as the sun makes it.
-  float blkHs = 0.26;
-  #if NUM_DIR_LIGHTS > 0
-  vec3 blkL = normalize((vec4(directionalLights[0].direction, 0.0) * viewMatrix).xyz);
-  float blkLn = dot(blkL, blkN);
-  if (blkLn > 0.03) blkHs = 0.14 + clamp(0.12 * blkL.y / blkLn, 0.0, 0.8);
-  #endif
-  float blkGh = blkGt - floor(blkGt / ${S}) * ${S};
-  float blkHead = blkGlass * mix(smoothstep(${F(HEAD - 0.05)} - blkHs, ${F(HEAD - 0.05)}, blkGh), 0.16, blkFar);
+  float blkGh = 0.0;
+  float blkHead = 0.0;
+  if (blkGlass > 0.0) {
+    float blkHs = 0.32;
+    #if NUM_DIR_LIGHTS > 0
+    vec3 blkL = (vec4(directionalLights[0].direction, 0.0) * viewMatrix).xyz;
+    float blkLn = dot(blkL, blkN);
+    if (blkLn > 0.03) blkHs = 0.14 + clamp(0.12 * blkL.y / blkLn, 0.0, 0.8);
+    #endif
+    blkGh = blkGt - floor(blkGt / ${S}) * ${S};
+    blkHead = blkGlass * mix(smoothstep(${F(HEAD - 0.06)} - blkHs, ${F(HEAD - 0.06)}, blkGh), 0.16, blkFar);
+  }
   // The fine shadow line under each slab, softening below it, and the sill catching the light.
   float blkSlab = blkUp * blkTrain(blkT, blkPx, ${F(STOREY - 0.07)}, ${S}, ${S});
   float blkSoft = blkUp * blkTrain(blkT, blkPx, ${F(STOREY - 0.3)}, ${F(STOREY - 0.07)}, ${S});
-  float blkSill = blkUp * blkFine * blkOx * blkTrain(blkT, blkPx, ${F(SILL - 0.05)}, ${F(SILL)}, ${S});
   // The void deck: open between columns about two bays apart, its inside lost in shade.
   float blkDeck = 0.0;
   if (blkUp < 0.5 && vSpan.y > 0.5) {
@@ -419,47 +449,59 @@ if (blkKind < 0.5 || (blkKind > 3.5 && blkKind < 4.5)) {
     float blkCol = blkCover(mod(blkU + 0.5 * blkCs, blkCs), blkPu, 0.5 * blkCs - 0.32, 0.5 * blkCs + 0.32, blkCs, 0.5 * blkCs - 0.4, 0.64 / blkCs);
     blkDeck = (1.0 - blkCol) * blkCover(blkY, blkPx, 0.0, ${F(DECK)}, ${G}, 0.6, ${F(DECK / GROUND)});
   }
-  float blkGk = blkMain ? 1.0 : 0.72;
+  float blkGk = blkMain || !blkStage ? 1.0 : 0.72;
   blkC = mix(blkC, blkCard * 1.05, 0.5 * blkSill);
   blkC = mix(blkC, blkCard * 0.8, blkFrame * blkGk);
-  blkC = mix(blkC, blkCard * vec3(0.36, 0.39, 0.43), blkGlass * blkGk);
+  blkC = mix(blkC, blkCard * vec3(0.33, 0.36, 0.41), blkGlass * blkGk);
   blkC = mix(blkC, blkCard * 0.74, 0.45 * blkSoft);
   blkC = mix(blkC, blkCard * 0.4, blkSlab * (blkMain ? 0.85 : 0.55));
   blkC = mix(blkC, blkCard * mix(0.36, 0.22, smoothstep(0.4, ${F(DECK)}, blkY)), blkDeck);
   blkDirect *= max(0.0, 1.0 - 0.85 * blkDeck - 0.65 * blkHead - 0.6 * blkSlab - 0.3 * blkSoft);
-  blkSky *= 1.0 - 0.4 * blkDeck - 0.2 * blkHead;
+  blkSky *= 1.0 - 0.4 * blkDeck - 0.35 * blkHead;
   float blkBand = 0.0;
-  if (blkMain) {
+  float blkBandOn = blkStage ? uBandOn : 0.0;
+  if (blkMain && blkBandOn > 0.0) {
     float inBand = smoothstep(uBand.x - blkPx, uBand.x, blkY) * (1.0 - smoothstep(uBand.y, uBand.y + blkPx, blkY));
     float rim = 1.0 - smoothstep(0.6 * blkPx, 1.7 * blkPx, min(abs(blkY - uBand.x), abs(blkY - uBand.y)));
-    blkBand = uBandOn * inBand;
+    blkBand = blkBandOn * inBand;
     // The storey is tinted a light peach, so the flat's own patch, in the sun's full orange, stands out of it.
     blkC = mix(blkC, mix(uMark, vec3(1.0), 0.34) * (1.0 - 0.22 * blkGlass - 0.5 * blkDeck), 0.74 * blkBand);
-    blkC = mix(blkC, uMark * 0.35, 0.9 * uBandOn * rim);
+    blkC = mix(blkC, uMark * 0.35, 0.9 * blkBandOn * rim);
     blkE += uMark * blkBand * (0.14 + 0.45 * uNight);
   }
-  // Glass picks up the sky, more of it the more obliquely it is seen.
-  float blkFres = 0.05 + 0.45 * pow(1.0 - min(abs(blkVn), 1.0), 4.0);
-  blkE += uFog.rgb * blkFres * blkGlass * blkGk * (1.0 - 0.6 * blkHead) * (1.0 - blkBand);
+  // Glass picks up the sky, more of it the more obliquely it is seen, and more where it mirrors the sky than
+  // where it mirrors the ground: a window above the eye shows the sky, one below it the ground and the blocks.
+  if (blkGlass > 0.0) {
+    float blkGrazing = 1.0 - min(abs(blkVn), 1.0);
+    blkGrazing *= blkGrazing;
+    float blkFres = 0.05 + 0.45 * blkGrazing * blkGrazing;
+    float blkMirror = mix(0.45, 1.25, smoothstep(-0.35, 0.25, -blkV.y));
+    blkE += uFog.rgb * blkFres * blkMirror * blkGlass * blkGk * (1.0 - 0.6 * blkHead) * (1.0 - blkBand);
+  }
   if (uNight > 0.001) {
-    // A flat's light, its own and the same every frame: on in uLit of them, warm or cool, brighter or dimmer.
-    float blkR = blkHash(vec2(blkSt + blkSeed * 7.0, blkBi + blkSeed * 13.0 + 11.0));
-    float blkOn = step(blkR, uLit);
-    float blkTone = blkHash(vec2(blkBi + blkSeed * 5.0 + 71.0, blkSt + 137.0));
-    vec3 blkLamp = mix((blkTone < 0.55 ? blkWarm : blkCool) * (0.62 + 0.38 * fract(blkR * 37.0)), mix(blkWarm, blkCool, 0.45) * 0.81, blkFar);
+    // The void deck is lit all night, evenly and dimly.
+    blkE += uNight * blkCool * 0.26 * blkDeck;
+  }
+  if (uNight > 0.001 && blkUp > 0.5 && blkMean > 0.0) {
+    // Lamplight, room by room (blkLitRoom): warm white or cool white by each household's taste, with the odd
+    // room the other way, brighter or dimmer, and some behind drawn curtains that soften and warm it.
+    float blkOn = blkLitRoom(blkSt, blkBi, blkSeed, uLit);
+    float blkRoom = blkHash(vec2(blkBi + blkSeed * 3.0 + 29.0, blkSt * 1.7 + 41.0));
+    float blkTaste = blkHash(vec2(floor((blkBi + mod(blkSeed, 2.0)) * 0.5) + blkSeed * 5.0 + 71.0, blkSt + 137.0));
+    bool blkWarmRoom = (blkTaste < 0.4) != (fract(blkRoom * 41.0) < 0.2);
+    vec3 blkLamp = (blkWarmRoom ? blkWarm : blkCool) * (0.7 + 0.3 * fract(blkRoom * 7.0));
+    if (fract(blkRoom * 17.0) < 0.28) blkLamp = mix(blkLamp, blkWarm, 0.35) * 0.55;
+    blkLamp = mix(blkLamp, mix(blkWarm, blkCool, 0.55) * 0.74, blkFar);
     float blkCeil = 0.82 + 0.18 * smoothstep(${F(SILL)}, ${F(HEAD)}, blkGh);
     // A lit window spills a little light onto the wall round it, and the window below onto the spandrel over it.
     vec2 blkD = vec2(max(abs(blkBx - blkMid) - blkHalf, 0.0), max(max(${F(SILL)} - blkH, blkH - ${F(HEAD)}), 0.0));
     float blkSpill = blkHalf > 0.11 ? blkOn * exp(-5.0 * length(blkD)) : 0.0;
     if (blkHalf > 0.11 && blkH < ${F(SILL)} && blkSt > 2.5) {
-      float blkRb = blkHash(vec2(blkSt - 1.0 + blkSeed * 7.0, blkBi + blkSeed * 13.0 + 11.0));
-      blkSpill += step(blkRb, uLit) * exp(-5.0 * length(vec2(blkD.x, blkH + ${F(STOREY - HEAD)})));
+      blkSpill += blkLitRoom(blkSt - 1.0, blkBi, blkSeed, uLit) * exp(-5.0 * length(vec2(blkD.x, blkH + ${F(STOREY - HEAD)})));
     }
     blkSpill = mix(blkSpill * (1.0 - blkOpen), 0.06 * uLit, blkFar);
-    float blkK = uNight * blkUp * (1.0 - 0.6 * blkBand) * (blkMain ? 1.0 : 0.9);
+    float blkK = uNight * (1.0 - 0.6 * blkBand) * (blkMain ? 1.0 : 0.9);
     blkE += blkK * (blkLamp * blkGlass * mix(blkOn, uLit, blkFar) * blkCeil + mix(blkWarm, blkCool, 0.4) * 0.1 * blkSpill);
-    // The void deck is lit all night, evenly and dimly.
-    blkE += uNight * blkCool * 0.26 * blkDeck;
   }
 } else if (blkKind > 4.5 && blkKind < 5.5) {
   // A multi-storey car park: on every deck a solid barrier to about a metre, then open to the slab over it,

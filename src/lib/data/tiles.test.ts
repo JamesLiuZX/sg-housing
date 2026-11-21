@@ -15,6 +15,8 @@ import {
   loadTiles,
   pixelToFrame,
   rangeBounds,
+  rangeRect,
+  rectBounds,
   tileAt,
   tileKnown,
   tileUrl,
@@ -127,6 +129,21 @@ describe('tiles in the block’s frame', () => {
         }
       expect(worst).toBeLessThan(0.005);
     }
+  });
+
+  it('places a rectangle of pixels where the tiles it is cut from say', () => {
+    const r = coverSquare(demo.lat, demo.lng, 300, 18);
+    const whole = rangeBounds(demo, r);
+    const px = rangeRect(r);
+    expect(rectBounds(demo, px)).toEqual(whole);
+    // Cut 100 px in from every side, the rectangle loses 100 px of ground on every side, each axis at its own scale.
+    const inner = rectBounds(demo, { ...px, px0: px.px0 + 100, py0: px.py0 + 100, px1: px.px1 - 100, py1: px.py1 - 100 });
+    const mx = (whole.maxX - whole.minX) / (px.px1 - px.px0);
+    const my = (whole.maxY - whole.minY) / (px.py1 - px.py0);
+    expect(inner.minX - whole.minX).toBeCloseTo(100 * mx, 3);
+    expect(whole.maxX - inner.maxX).toBeCloseTo(100 * mx, 3);
+    expect(whole.maxY - inner.maxY).toBeCloseTo(100 * my, 3);
+    expect(inner.minY - whole.minY).toBeCloseTo(100 * my, 3);
   });
 
   it('covers a square round the block with the fewest whole tiles', () => {
@@ -255,19 +272,36 @@ describe('loading tiles', () => {
     expect(got).toBe(48);
   });
 
-  it('has a bundled map for the demo block only, and it needs no network', async () => {
+  it('has a bundled map for the demo block only, as far as its table reaches, and it needs no network', async () => {
     const calls = mockFetch(blocked);
     expect(await bundledMap('520201')).toBeNull();
     const demoMap = await bundledMap('121440');
-    // The pictures are written by `npm run demo`; with them, the range is the tiles they are a mosaic of.
-    if (demoMap) {
-      const b = rangeBounds(demo, demoMap.range);
-      expect(b.minX).toBeLessThan(-200);
-      expect(b.maxX).toBeGreaterThan(200);
-      expect(b.minY).toBeLessThan(-200);
-      expect(b.maxY).toBeGreaterThan(200);
+    expect(demoMap).not.toBeNull();
+    // The demo's table fades out 283 m from the block (0.92 of its 307 m radius); the picture reaches that far on every
+    // side, centred on the block, and no further than it need.
+    const b = rectBounds(demo, demoMap!.rect);
+    for (const edge of [-b.minX, b.maxX, -b.minY, b.maxY]) {
+      expect(edge).toBeGreaterThan(283);
+      expect(edge).toBeLessThan(290);
     }
+    const decoded = stubDecode();
+    const day = await demoMap!.image(false);
+    const night = await demoMap!.image(true);
+    expect(day).not.toBeNull();
+    expect(night).not.toBeNull();
+    day!.close();
+    night!.close();
+    expect(decoded.closed).toBe(2);
     expect(calls).toHaveLength(0);
+  });
+
+  it('keeps the bundled map within what the single-file build can carry', async () => {
+    const { DEMO_GROUND } = await import('./demo-ground');
+    // Both pictures, as the base64 the build inlines: the demo may add at most about 150 KB.
+    expect(DEMO_GROUND.day.length + DEMO_GROUND.night.length).toBeLessThan(140 * 1024);
+    for (const picture of [DEMO_GROUND.day, DEMO_GROUND.night]) expect(atob(picture.slice(0, 16)).slice(8, 12)).toBe('WEBP');
+    expect(DEMO_GROUND.rect.z).toBe(18);
+    expect(DEMO_GROUND.taken).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 
   it('stops asking once the signal fires, and closes what arrives after', async () => {

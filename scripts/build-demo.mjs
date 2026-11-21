@@ -19,10 +19,20 @@
  * Needs Node 22.18 or later, which reads TypeScript without a build step: the
  * street spellings come from the app's own src/lib/data/street.ts, so the
  * script and the app cannot disagree about them.
+ *
+ * It also writes src/lib/data/demo-ground.ts, the block's bundled map: OneMap's
+ * Grey and Night maps at zoom 18 round the block, as far as the block stage's
+ * table reaches, stitched and kept as WebP, so the demo stands on its street
+ * with no network. Node has no image encoder, so that one step runs
+ * scripts/demo-ground.py (Python 3 with Pillow); without it the bundled map is
+ * left as it was and the script says so. `npm run demo -- --ground` redoes
+ * only the map.
  */
 
-import { readFile, writeFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { hdbBlock, hdbStreet, streetKey } from '../src/lib/data/street.ts';
 import { ALPHABET } from './build-blocks.mjs';
 
@@ -45,6 +55,17 @@ const HEIGHT_FIELDS = ['blk_no', 'street', 'max_floor_lvl', 'residential', 'comm
 const ONEMAP_GAP_MS = 1000;
 /** No block number has more Property Information rows than this (Blk 1 has 36). */
 const ROWS_PER_NUMBER = 50;
+const GROUND_OUT = resolve('src/lib/data/demo-ground.ts');
+/** The table under the demo block fades out 283 m from it (0.92 of its 307 m radius, in src/lib/engine/site.ts). */
+const GROUND_HALF = 285;
+/** The table's own zoom in src/lib/engine/ground.ts: 0.6 m to a pixel here. */
+const GROUND_ZOOM = 18;
+/** OneMap's drawn map by day and after dark, as the stage shows them. */
+const GROUND_STYLES = ['Grey', 'Night'];
+/** WebP quality: lines and lettering stay clean, and both pictures together come to about 95 KB. */
+const GROUND_QUALITY = 45;
+/** Between tile requests: a script nobody waits on asks gently. */
+const TILE_GAP_MS = 120;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -154,8 +175,146 @@ async function neighbourHeights(neighbours) {
   });
 }
 
+// ── The bundled map ──
+
+const RAD = Math.PI / 180;
+const WGS84_A = 6378137;
+const WGS84_E2 = 0.00669437999014;
+
+/** Where a latitude and longitude falls at zoom z, in world pixels from the north-west corner, as src/lib/data/tiles.ts has it. */
+function worldPixel(lat, lng, z) {
+  const n = 256 * 2 ** z;
+  return [((lng + 180) / 360) * n, ((1 - Math.asinh(Math.tan(lat * RAD)) / Math.PI) / 2) * n];
+}
+
+/** Metres on the ground to a degree east and a degree north at a latitude: the ellipsoid's radii of curvature, as src/lib/data/shard.ts. */
+function metresPerDegree(lat) {
+  const s = Math.sin(lat * RAD);
+  const w = 1 - WGS84_E2 * s * s;
+  return [(WGS84_A / Math.sqrt(w)) * Math.cos(lat * RAD) * RAD, ((WGS84_A * (1 - WGS84_E2)) / (w * Math.sqrt(w))) * RAD];
+}
+
+/** A block's centroid, [lat, lng], as the app finds it (centroidOf and localFrame in src/lib/data/shard.ts). */
+function centroidOf(shard, row) {
+  let cx = 0;
+  let cy = 0;
+  let a = 0;
+  // Holes run clockwise, so their area takes itself off.
+  for (const text of row.slice(2)) {
+    const r = decodeRing(text);
+    for (let i = 0; i < r.length; i++) {
+      const [x0, y0] = r[i];
+      const [x1, y1] = r[(i + 1) % r.length];
+      const k = x0 * y1 - x1 * y0;
+      cx += (x0 + x1) * k;
+      cy += (y0 + y1) * k;
+      a += k;
+    }
+  }
+  const [lat0, lng0] = shard.origin;
+  const [kx, ky] = metresPerDegree(lat0);
+  return [lat0 + ((cy / (3 * a)) * shard.unit) / ky, lng0 + ((cx / (3 * a)) * shard.unit) / kx];
+}
+
+/**
+ * The world pixels GROUND_HALF metres round a point, out to whole pixels: what
+ * the bundled picture shows. The app lays it on the ground from these pixels
+ * alone, through the same projection as the footprints.
+ */
+function groundRect(lat, lng) {
+  const [kx, ky] = metresPerDegree(lat);
+  const [px0, py0] = worldPixel(lat + GROUND_HALF / ky, lng - GROUND_HALF / kx, GROUND_ZOOM);
+  const [px1, py1] = worldPixel(lat - GROUND_HALF / ky, lng + GROUND_HALF / kx, GROUND_ZOOM);
+  return { z: GROUND_ZOOM, px0: Math.floor(px0), py0: Math.floor(py0), px1: Math.ceil(px1), py1: Math.ceil(py1) };
+}
+
+async function getTile(url) {
+  for (let attempt = 1; ; attempt++) {
+    const res = await fetch(url);
+    if (res.ok) {
+      const body = Buffer.from(await res.arrayBuffer());
+      // Past a style's highest zoom OneMap answers 200 with nothing in it.
+      if (!body.length) throw new Error(`OneMap has no tile at ${url}`);
+      return body;
+    }
+    if (attempt < 3 && (res.status === 429 || res.status >= 500)) {
+      await sleep(2000 * attempt);
+      continue;
+    }
+    throw new Error(`${res.status} from ${url}`);
+  }
+}
+
+/**
+ * Fetches, stitches and writes the demo block's bundled map round its
+ * centroid. Leaves the bundled map as it was, and says why, if the pictures
+ * cannot be made.
+ */
+async function buildGround(shard, row, taken) {
+  const rect = groundRect(...centroidOf(shard, row));
+  const [tx0, ty0, tx1, ty1] = [rect.px0, rect.py0, rect.px1 - 1, rect.py1 - 1].map((p) => Math.floor(p / 256));
+  const dir = await mkdtemp(join(tmpdir(), 'blk-demo-ground-'));
+  try {
+    for (const style of GROUND_STYLES) {
+      console.log(`OneMap: ${(tx1 - tx0 + 1) * (ty1 - ty0 + 1)} ${style} tiles at zoom ${GROUND_ZOOM}`);
+      for (let x = tx0; x <= tx1; x++)
+        for (let y = ty0; y <= ty1; y++) {
+          await writeFile(join(dir, `${style}-${x}-${y}.png`), await getTile(`https://www.onemap.gov.sg/maps/tiles/${style}/${GROUND_ZOOM}/${x}/${y}.png`));
+          await sleep(TILE_GAP_MS);
+        }
+    }
+    const args = [rect.z, rect.px0, rect.py0, rect.px1, rect.py1, GROUND_QUALITY].map(String);
+    const run = spawnSync('python3', ['-I', resolve('scripts/demo-ground.py'), dir, ...args, ...GROUND_STYLES], { encoding: 'utf8' });
+    if (run.error || run.status !== 0) {
+      console.warn(
+        run.status === 2
+          ? 'Left the bundled map as it was: making it needs Python 3 with Pillow built with WebP (pip install Pillow).'
+          : `Left the bundled map as it was: scripts/demo-ground.py failed. ${run.error?.message ?? run.stderr.trim()}`
+      );
+      return;
+    }
+    const [day, night] = await Promise.all(GROUND_STYLES.map((s) => readFile(join(dir, `${s}.webp`))));
+    const date = taken.toISOString().slice(0, 10);
+    const text = [
+      '/**',
+      ` * The demo block's bundled map: OneMap's ${GROUND_STYLES.join(' and ')} maps at zoom ${GROUND_ZOOM}, ${GROUND_HALF} m round`,
+      ` * Blk ${QUERY}, taken ${date}, stitched and kept as WebP. Written by scripts/build-demo.mjs;`,
+      ' * do not edit by hand, run `npm run demo -- --ground`. bundledMap in src/lib/data/tiles.ts lays',
+      ' * it on the ground where its pixels say, so the demo stands on its street with no network.',
+      ' *',
+      ' * Map: OneMap © contributors | Singapore Land Authority, shown under OneMap’s terms with its',
+      ' * logo and attribution wherever it is on screen (https://www.onemap.gov.sg/docs/maps/).',
+      ' */',
+      '',
+      "import type { PixelRect } from './tiles';",
+      '',
+      'export const DEMO_GROUND: { postal: string; taken: string; rect: PixelRect; type: string; day: string; night: string } = {',
+      `  postal: ${JSON.stringify(POSTAL)},`,
+      `  taken: ${JSON.stringify(date)},`,
+      `  rect: ${JSON.stringify(rect).replace(/"(\w+)":/g, '$1: ').replace(/,/g, ', ').replace('{', '{ ').replace(/}$/, ' }')},`,
+      `  type: ${JSON.stringify('image/webp')},`,
+      `  day: ${JSON.stringify(day.toString('base64'))},`,
+      `  night: ${JSON.stringify(night.toString('base64'))}`,
+      '};',
+      ''
+    ].join('\n');
+    await writeFile(GROUND_OUT, text);
+    console.log(
+      `Wrote ${GROUND_OUT}: ${rect.px1 - rect.px0} by ${rect.py1 - rect.py0} px, day ${(day.length / 1024).toFixed(1)} KB, night ${(night.length / 1024).toFixed(1)} KB, ${(Buffer.byteLength(text) / 1024).toFixed(1)} KB as text`
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
 async function main() {
   const taken = new Date();
+
+  console.log('Block index: public/blocks/12.json');
+  const shard = JSON.parse(await readFile(resolve('public/blocks/12.json'), 'utf8'));
+  const mine = shard.blocks.find((r) => r[0] === POSTAL);
+  if (!mine) throw new Error(`${POSTAL} is not in the block index`);
+  if (process.argv.includes('--ground')) return buildGround(shard, mine, taken);
 
   console.log('OneMap: searching for', QUERY);
   const search = await oneMapSearch(QUERY);
@@ -179,10 +338,6 @@ async function main() {
   const columns = ['month', 'flat_type', 'storey_range', 'floor_area_sqm', 'flat_model', 'lease_commence_date', 'remaining_lease', 'resale_price'];
   const rows = resales.records.map((r) => columns.map((c) => String(r[c] ?? '')));
 
-  console.log('Block index: public/blocks/12.json');
-  const shard = JSON.parse(await readFile(resolve('public/blocks/12.json'), 'utf8'));
-  const mine = shard.blocks.find((r) => r[0] === POSTAL);
-  if (!mine) throw new Error(`${POSTAL} is not in the block index`);
   const box = boxOf(mine, shard.unit);
   const near = shard.blocks.filter((r) => r === mine || gap(box, boxOf(r, shard.unit)) <= MARGIN);
 
@@ -254,6 +409,8 @@ async function main() {
   await writeFile(OUT, text);
   const known = heights.filter((r) => r[2]).length;
   console.log(`Wrote ${OUT}: ${near.length} blocks, ${known} of ${heights.length} neighbour heights, ${rows.length} sales, ${(Buffer.byteLength(text) / 1024).toFixed(1)} KB`);
+
+  await buildGround(shard, mine, taken);
 }
 
 main().catch((err) => {

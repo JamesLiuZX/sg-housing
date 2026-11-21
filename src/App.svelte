@@ -7,6 +7,7 @@
   import BlockStage from './lib/ui/BlockStage.svelte';
   import Dock from './lib/ui/Dock.svelte';
   import Landing from './lib/ui/Landing.svelte';
+  import MapCredit from './lib/ui/MapCredit.svelte';
   import { ms } from './lib/ui/motion';
   import { readParams } from './lib/ui/params';
   import { roomView } from './lib/ui/pins';
@@ -107,7 +108,8 @@
     // A tap on the block names the side. The storey stays where the scale has it: people tap a side, not a floor.
     facade: (pick) => {
       if (session.stage === 'block') session.chooseSide(pick.facade, pick.along);
-    }
+    },
+    map: (shown) => (session.mapShown = shown)
   };
 
   // A viewer per canvas. The canvas is keyed on `generation`, so a bump builds a fresh one.
@@ -179,6 +181,7 @@
   $effect(() => viewer?.setDayPath(session.path));
   $effect(() => viewer?.setBearing(session.bearing));
   $effect(() => viewer?.setFurnished(session.furnished));
+  $effect(() => viewer?.setGround(session.ground));
   $effect(() => {
     if (session.stage !== 'explore' || !viewer) return;
     const before = viewer.lens;
@@ -469,9 +472,11 @@
     <!-- The standing disclosure, while the camera travels and the stage it left has taken its own words away.
          Going in, it waits for those words to fade; coming back out to the block, there are none to wait for. -->
     {#if traveling}
-      <p class="standing" in:fade={{ duration: ms(200), delay: ms(session.stage === 'leaving' ? 0 : 280) }} out:fade={{ duration: ms(300) }}>
-        Computer-generated model, not a photograph
-      </p>
+      <div class="standing" in:fade={{ duration: ms(200), delay: ms(session.stage === 'leaving' ? 0 : 280) }} out:fade={{ duration: ms(300) }}>
+        <p>Computer-generated model, not a photograph</p>
+        <!-- OneMap's map is still on the table as the camera flies, so its attribution travels too. -->
+        <MapCredit shown={session.mapShown} />
+      </div>
     {/if}
   </div>
 </div>
@@ -481,6 +486,9 @@
     position: absolute;
     top: calc(var(--gutter) + var(--safe-t));
     left: calc(var(--gutter) + var(--safe-l));
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
     font-size: 11px;
     color: var(--ink-2);
     pointer-events: none;

@@ -32,5 +32,6 @@ export { lookupBlock } from './lookup';
 export { knownNeighbourHeights, lookupNeighbourHeights, type NeighbourLookupOptions } from './neighbours';
 export { lookupDemo, demoHit, isDemoHit, DEMO_POSTAL, DEMO_TAKEN, type DemoLookup } from './demo';
 export { hdbStreet, streetKey, hdbBlock } from './street';
+export { MAX_ZOOM, TILE_PX, bundledMap, coverSquare, frameToPixel, fromWorldPixel, loadTile, loadTiles, pixelToFrame, rangeBounds, rangeRect, rectBounds, tileAt, tileUrl, tilesIn, toWorldPixel, type BundledMap, type MapStyle, type PixelRect, type TileId, type TileImage, type TileRange } from './tiles';
 export { cacheClear as clearDataCache } from './cache';
 export type { Manifest, ManifestSector } from './shard';
