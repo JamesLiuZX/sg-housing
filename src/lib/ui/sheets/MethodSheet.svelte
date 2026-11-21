@@ -1,0 +1,23 @@
+<script lang="ts">
+  import type { Viewer } from '../../engine/Viewer';
+  import type { Session } from '../session.svelte';
+
+  /**
+   * How Blk works. What is real, what is typical, where every figure comes from, and what Blk does with your data.
+   *
+   * Shown inside the shared Sheet by Sheets.svelte, which supplies the title
+   * and the way to close. This file is the whole of the sheet's content.
+   */
+  let { session, viewer }: { session: Session; viewer: Viewer | null } = $props();
+  void session;
+  void viewer;
+</script>
+
+<p class="soon">Not built yet.</p>
+
+<style>
+  .soon {
+    margin: 8px 0 12px;
+    color: var(--ink-2);
+  }
+</style>

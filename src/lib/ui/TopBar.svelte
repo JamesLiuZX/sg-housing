@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { shortlist } from '../shortlist.svelte';
   import { roadName, storeyTag, typeWords } from './place';
   import type { Session } from './session.svelte';
 
@@ -18,6 +19,7 @@
   const fit = $derived(session.candidate && session.candidate.fit !== 'good' ? 'Closest typical layout' : 'Typical layout');
   // Said only when the stand-in is noticeably bigger or smaller than the real flat.
   const differs = $derived(area !== null && Math.abs(area - plan.areaSqm) >= 3);
+  const saved = $derived(shortlist.has(session));
 </script>
 
 <!-- data-avoid: room labels keep clear of it. -->
@@ -49,6 +51,15 @@
   </p>
   <!-- A standing disclosure. It stays on screen in every state. -->
   <p class="model">Computer-generated model, not a photograph</p>
+  <!-- What you can do with the flat on screen: keep it, or send it. -->
+  <div class="acts">
+    <button class="act glass" class:on={saved} aria-pressed={saved} aria-label={saved ? 'Remove from shortlist' : 'Save to shortlist'} onclick={() => shortlist.toggle(session)}>
+      <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M4.5 2.5h9v13L9 12l-4.5 3.5v-13Z" /></svg>
+    </button>
+    <button class="act glass" aria-label="Share this flat" onclick={() => (session.sheet = 'share')}>
+      <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M9 11.5V2.5M5.5 5.5 9 2l3.5 3.5M3.5 9.5v5h11v-5" /></svg>
+    </button>
+  </div>
 </header>
 
 <style>
@@ -134,6 +145,32 @@
   }
   .sub .num {
     font-size: 11.5px;
+  }
+  .acts {
+    position: absolute;
+    top: 0;
+    right: 0;
+    display: flex;
+    gap: 8px;
+    pointer-events: auto;
+  }
+  .act {
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    color: var(--ink);
+  }
+  .act svg {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .act.on svg {
+    fill: currentColor;
   }
   .model {
     grid-column: 1 / -1;

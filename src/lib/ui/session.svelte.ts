@@ -21,6 +21,9 @@ import { facingOf, sunSummary } from './sunText';
  */
 export type Stage = 'landing' | 'opening' | 'block' | 'entering' | 'leaving' | 'explore' | 'walk';
 
+/** What can open in the sheet. One at a time. */
+export type SheetName = 'share' | 'sales' | 'nearby' | 'year' | 'rule' | 'shortlist' | 'method';
+
 export interface SessionInit {
   lens?: Lens | null;
   minutes?: number | null;
@@ -64,6 +67,8 @@ export class Session {
   /** Compass bearing that the top of the plan faces, degrees. */
   bearing = $state(0);
   furnished = $state(true);
+  /** The sheet that is open, if any. Set it to open one; null closes it. See Sheets.svelte. */
+  sheet = $state<SheetName | null>(null);
   /** The wall chosen in the Rules lens. Set by the engine's `wall` hook. */
   wall = $state<Wall | null>(null);
   playing = $state(false);

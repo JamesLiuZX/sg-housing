@@ -15,6 +15,7 @@
   import PlanMarks from './lib/ui/PlanMarks.svelte';
   import RoomLabels from './lib/ui/RoomLabels.svelte';
   import { Session, type Arrival } from './lib/ui/session.svelte';
+  import Sheets from './lib/ui/Sheets.svelte';
   import TopBar from './lib/ui/TopBar.svelte';
   import WalkHud from './lib/ui/WalkHud.svelte';
   import WallPin from './lib/ui/WallPin.svelte';
@@ -478,6 +479,9 @@
         <MapCredit shown={session.mapShown} />
       </div>
     {/if}
+
+    <!-- Everything that opens in the sheet: sharing, sales, nearby, the year's sun, a rule in full, the shortlist. -->
+    <Sheets {session} {viewer} />
   </div>
 </div>
 
