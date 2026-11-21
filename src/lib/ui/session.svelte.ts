@@ -67,6 +67,8 @@ export class Session {
   /** Compass bearing that the top of the plan faces, degrees. */
   bearing = $state(0);
   furnished = $state(true);
+  /** The price the seller is asking, S$, when the person has given one (typed, or read from pasted listing text). */
+  asking = $state<number | null>(null);
   /** The sheet that is open, if any. Set it to open one; null closes it. See Sheets.svelte. */
   sheet = $state<SheetName | null>(null);
   /** The wall chosen in the Rules lens. Set by the engine's `wall` hook. */
