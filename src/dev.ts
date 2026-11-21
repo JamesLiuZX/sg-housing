@@ -10,6 +10,11 @@
  * it the other way round, as its twin across the party wall; ?walk=living stands in a room (?walk=1 at the
  * front door) with no flight in, looking at its window, with ?skip=1.
  *
+ * Settling: once still, the picture refines itself into a properly lit render over about a second
+ * (48 samples on a desktop pointer, 32 on a coarse one, fewer on a slow device). ?samples=16 fixes the
+ * count, as headless Chromium on a software renderer wants (it draws a frame every few tenths of a second);
+ * ?quality=fast keeps the single fast pass. `await blk.settled()` waits for the settled picture.
+ *
  * The plan is validated on load and every issue goes to the console, so a layout
  * being drawn shows its mistakes in the same place as its model.
  */
@@ -42,6 +47,8 @@ const viewer = new Viewer(document.getElementById('c') as HTMLCanvasElement, pla
 });
 viewer.setSun(sunAt(date, minutes));
 viewer.setDayPath(dayPath(date));
+if (q.has('samples')) viewer.setSamples(Number(q.get('samples')));
+if (q.get('quality') === 'fast') viewer.setQuality('fast');
 
 const api = {
   viewer,
@@ -52,7 +59,10 @@ const api = {
     const d = { ...date, month };
     viewer.setDayPath(dayPath(d));
     viewer.setSun(sunAt(d, m));
-  }
+  },
+  /** Resolves once the picture has settled. */
+  settled: () => viewer.settled(),
+  stats: () => viewer.renderStats()
 };
 (window as unknown as { blk: typeof api }).blk = api;
 

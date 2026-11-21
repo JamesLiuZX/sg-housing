@@ -20,8 +20,11 @@
  *                     only: the app does not offer it, see MAX_ZOOM in src/lib/data/tiles.ts) or paper
  *   ?heights=1        first asks OneMap and data.gov.sg for the neighbours' heights and kinds, as the app does once a block
  *                     is shown (for up to 20 s); without it the block is built with what this device knows, as the app first is
+ *   ?samples=16       settles the still picture with exactly this many samples (headless software rendering
+ *                     is slow; the device's own count is 48 on a desktop pointer, 32 on a
+ *                     coarse one, fewer on a slow device); ?quality=fast keeps the single fast pass
  *
- * window.blk drives it from tests: setTime, storey, unit, push, enter, exit, jump, plan, walk, verify, stats.
+ * window.blk drives it from tests: setTime, storey, unit, push, enter, exit, jump, plan, walk, verify, stats, settled.
  */
 import * as THREE from 'three';
 import { DEMO_POSTAL, facadeFacing, knownNeighbourHeights, loadBlock, lookupDemo, lookupNeighbourHeights, type Block } from './lib/data';
@@ -84,6 +87,8 @@ function setTime(m: number, month = date.month): void {
 setTime(minutes);
 const ground = q.get('ground');
 if (ground === 'paper' || ground === 'aerial' || ground === 'map') viewer.setGround(ground);
+if (q.has('samples')) viewer.setSamples(num('samples', 0));
+if (q.get('quality') === 'fast') viewer.setQuality('fast');
 
 /** Stands the flat on the side looking closest to `bearing`, turning it to face that side. */
 function place(bearing: number, along = 0.5): void {
@@ -165,7 +170,9 @@ const api = {
     return viewer.enterWalk(view?.at, view?.lookAt, { now: true });
   },
   verify,
-  stats: () => viewer.renderStats()
+  stats: () => viewer.renderStats(),
+  /** Resolves once the picture has settled. */
+  settled: () => viewer.settled()
 };
 (window as unknown as { blk: typeof api }).blk = api;
 

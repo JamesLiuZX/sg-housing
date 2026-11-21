@@ -6,6 +6,7 @@ import { mainFacade } from '../plan/facing';
 import { frameOf } from '../plan/geometry';
 import type { Plan, Wall } from '../plan/types';
 import type { PathPoint, Sun } from '../sg/solar';
+import { Settle, type Quality, type SampleLights } from './accumulate';
 import { buildFlat, type Built, type RoomAnchor } from './build';
 import { BOUNCE_SCALE } from './field';
 import type { GroundKind } from './ground';
@@ -21,6 +22,7 @@ import { Tweens, clamp, ease, lerp, smooth } from './tween';
 export type { BlockSite } from './site';
 export type { Unit } from './placement';
 export type { GroundKind } from './ground';
+export type { Quality } from './accumulate';
 
 export type Lens = 'space' | 'sun' | 'rules';
 export type Mode = 'plan' | 'doll' | 'walk' | 'block';
@@ -49,6 +51,8 @@ export interface Hooks {
   facade?: (pick: FacadePick) => void;
   /** OneMap's base map has come onto the table, or left it: its attribution must show while it is there. */
   map?: (shown: boolean) => void;
+  /** The picture has settled: refined to its last sample, and nothing more is drawn until something changes. */
+  settled?: () => void;
 }
 
 const DEG = Math.PI / 180;
@@ -124,6 +128,21 @@ const LOW_SUN_OFF = 12 * (Math.PI / 180);
 const LOW_SUN_TURN = 110 * (Math.PI / 180);
 /** Seconds for the view to catch up with the sun as it is dragged: the time constant of an eased follow. */
 const SUN_FOLLOW = 0.45;
+/**
+ * The layer the flat's ceiling is drawn on, alone: the camera and the sun's
+ * shadow see it, the studio dome does not, so in the settled picture the sun
+ * still reaches the floor only through the windows while the softbox over
+ * the model lights it as a roofless model.
+ */
+const CEILING_LAYER = 4;
+/** How long the picture stays still before it starts to settle, ms: a pause in a drag does not start it. */
+const SETTLE_DELAY = 110;
+/**
+ * The sun's filter in the settled picture, against the fast one's: sharper,
+ * since there the sun's disc softens a shadow with distance and the filter
+ * only has to join neighbouring samples' edges.
+ */
+const SETTLED_SOFT = 0.7;
 
 /** The two ends of the push-in: the block view and the dollhouse view, each as an orbit about a target. */
 interface PushPlan {
@@ -343,6 +362,20 @@ export class Viewer {
   /** What the site stands on: OneMap's map, or the plain paper table. Kept for every block shown. */
   private groundKind: GroundKind = 'map';
 
+  // ── Settling ──
+  /** The settled picture's buffers and samples. */
+  private settle: Settle;
+  private picture: Quality = 'full';
+  /** The picture is still and as refined as it will get. */
+  private isSettled = false;
+  private waiters: (() => void)[] = [];
+  /** When the last frame that moved was drawn, ms. */
+  private movedAt = 0;
+  private sampleLights: SampleLights = { sun: new THREE.Vector3(), dome: new THREE.Vector3() };
+  /** Draw calls and triangles of the last pass over the scene, shadow pass excepted. */
+  private drawn = { calls: 0, triangles: 0 };
+  private dprQuery: MediaQueryList | null = null;
+
   constructor(canvas: HTMLCanvasElement, plan: Plan, hooks: Hooks = {}) {
     this.canvas = canvas;
     this.current = plan;
@@ -387,6 +420,11 @@ export class Viewer {
     s.normalBias = 0.024;
     this.sunLight.castShadow = true;
     this.scene.add(this.sunLight, this.sunLight.target);
+    // The ceiling has a layer of its own, which the camera and the sun see and the studio dome does not.
+    this.camera.layers.enable(CEILING_LAYER);
+    s.camera.layers.enable(CEILING_LAYER);
+    this.settle = new Settle(this.renderer, this.coarse);
+    this.adoptFlat();
 
     this.buildCompass();
     this.compass.position.y = -BASE + 0.01;
@@ -426,6 +464,9 @@ export class Viewer {
     window.addEventListener('pointerdown', this.onDownFirst, { capture: true });
     window.addEventListener('keydown', this.onKey);
     window.addEventListener('keyup', this.onKeyUp);
+    canvas.addEventListener('webglcontextlost', this.onContextLost);
+    canvas.addEventListener('webglcontextrestored', this.onContextRestored);
+    document.addEventListener('visibilitychange', this.onVisibility);
 
     this.ro = new ResizeObserver(() => this.resize());
     this.ro.observe(canvas.parentElement ?? canvas);
@@ -433,6 +474,18 @@ export class Viewer {
     this.setCompass(0);
     this.applyLight();
     this.raf = requestAnimationFrame(this.tick);
+  }
+
+  /** The flat's ceiling on its own layer, and its materials reading the studio dome. For each flat built. */
+  private adoptFlat(): void {
+    const H = this.built.height;
+    for (const mesh of this.built.shell) {
+      mesh.geometry.computeBoundingBox();
+      const b = mesh.geometry.boundingBox!;
+      // The ceiling is the flat sheet up at ceiling height; the door heads stand in the walls.
+      if (b.max.y - b.min.y < 0.02 && b.min.y > H * 0.5) mesh.layers.set(CEILING_LAYER);
+    }
+    this.settle.adopt(this.built.root);
   }
 
   /** Radius of the compass ring for a flat: clear of its corners. */
@@ -676,6 +729,14 @@ export class Viewer {
     const el = this.canvas.parentElement ?? this.canvas;
     this.w = Math.max(1, el.clientWidth);
     this.h = Math.max(1, el.clientHeight);
+    // The window may have moved to another screen, or been zoomed: draw for its pixels.
+    const pr = Math.min(window.devicePixelRatio || 1, 2);
+    if (pr !== this.renderer.getPixelRatio()) {
+      this.renderer.setPixelRatio(pr);
+      (this.pathDots.material as THREE.PointsMaterial).size = 2.6 * pr;
+      (this.hourDots.material as THREE.PointsMaterial).size = 6 * pr;
+    }
+    this.watchDpr();
     this.renderer.setSize(this.w, this.h, false);
     this.applyView();
     if (this.mode === 'plan') {
@@ -691,6 +752,17 @@ export class Viewer {
       this.setLimits(this.fit(a.theta, a.phi));
     }
   }
+
+  /** A change of device pixel ratio does not always resize the canvas, so it is watched for itself. */
+  private watchDpr(): void {
+    const dpr = window.devicePixelRatio || 1;
+    if (this.dprQuery?.media.includes(`${dpr}dppx`)) return;
+    this.dprQuery?.removeEventListener('change', this.onDpr);
+    this.dprQuery = window.matchMedia?.(`(resolution: ${dpr}dppx)`) ?? null;
+    this.dprQuery?.addEventListener('change', this.onDpr);
+  }
+
+  private onDpr = (): void => this.resize();
 
   // ── Opening sequence ──────────────────────────────────────────────────────
 
@@ -826,10 +898,11 @@ export class Viewer {
     this.lens = lens;
     const rule0 = this.u.uRule.value;
     const rule1 = lens === 'rules' ? 1 : 0;
-    if (rule0 !== rule1) void this.tweens.run('rule', 0.55, (k) => (this.u.uRule.value = lerp(rule0, rule1, k)));
+    // Also when a tween toward the other lens has not moved the value yet, or it would finish there.
+    if (rule0 !== rule1 || this.tweens.has('rule')) void this.tweens.run('rule', 0.55, (k) => (this.u.uRule.value = lerp(rule0, rule1, k)));
     const c0 = this.compassShow;
     const c1 = lens === 'sun' ? 1 : 0;
-    if (c0 !== c1) void this.tweens.run('compass', 0.6, (k) => this.setCompass(lerp(c0, c1, k)));
+    if (c0 !== c1 || this.tweens.has('compass')) void this.tweens.run('compass', 0.6, (k) => this.setCompass(lerp(c0, c1, k)));
     this.syncFurniture();
     if (lens !== 'rules') this.select(null);
     // Choosing the Sun lens hands it the angle again, until the person next turns the view.
@@ -974,7 +1047,7 @@ export class Viewer {
     if (this.mode === 'plan') return;
     const want = this.furnished && this.lens !== 'rules' ? 1 : 0;
     const from = this.u.uPop.value;
-    if (from === want) return;
+    if (from === want && !this.tweens.has('pop')) return;
     for (const o of this.built.furniture) o.visible = true;
     void this.tweens
       .run('pop', want ? 1.1 : 0.7, (k) => (this.u.uPop.value = lerp(from, want, k)), { ease: want ? ease.linear : ease.inOut })
@@ -1135,9 +1208,10 @@ export class Viewer {
    * Fits the sun's shadow camera tightly round the model as the sun sees it,
    * so the map's texels are as small as they can be and the depth range is
    * short enough for a millimetre-scale bias. The filter is set in metres, so
-   * the softness of a patch's edge does not change with the sun's angle.
+   * the softness of a patch's edge does not change with the sun's angle; a
+   * settled sample's is sharper, its sun's disc doing the softening.
    */
-  private fitShadow(dir: THREE.Vector3): void {
+  private fitShadow(dir: THREE.Vector3, settled = false): void {
     // On the block stage the fit opens out to the whole site, a few hundred metres across,
     // and closes back round the flat as the push-in arrives.
     const site = this.site && this.siteW > 0 ? this.site : null;
@@ -1184,7 +1258,7 @@ export class Viewer {
     cam.far = -lo.z + 0.5;
     cam.updateProjectionMatrix();
     const texel = Math.max(hi.x - lo.x, hi.y - lo.y) / this.sunLight.shadow.mapSize.x;
-    this.sunLight.shadow.radius = Math.max(1, lerp(SOFT_STEP, SITE_SOFT, w) / texel);
+    this.sunLight.shadow.radius = Math.max(1, (lerp(SOFT_STEP, SITE_SOFT, w) * (settled ? SETTLED_SOFT : 1)) / texel);
     // The lift off a receiver's own depth grows with the texel, or the site's walls would shade themselves.
     this.sunLight.shadow.normalBias = Math.max(0.024, 1.4 * texel * w);
   }
@@ -1540,6 +1614,7 @@ export class Viewer {
     this.select(null);
     this.siteSpec = site;
     this.site = buildSite(site, this.coarse, () => (this.dirty = true), { kind: this.groundKind, onShown: (s) => this.hooks.map?.(s) });
+    this.settle.adopt(this.site.root);
     this.site.u.uSiteShadow.value = this.outdoors.map.texture;
     this.siteShadowDirty = true;
     this.scene.add(this.site.root);
@@ -1685,10 +1760,62 @@ export class Viewer {
     this.pushAt(this.pushHold, clamp(t, 0, PUSH_TIME));
   }
 
-  /** Draw calls and triangles of the last frame, shadow pass included. */
-  renderStats(): { calls: number; triangles: number; geometries: number; textures: number } {
+  /**
+   * Draw calls and triangles of the last pass over the scene, and the
+   * settled picture: samples in it so far, samples it is aiming for, whether
+   * it has settled, and the bytes its buffers hold.
+   */
+  renderStats(): {
+    calls: number;
+    triangles: number;
+    geometries: number;
+    textures: number;
+    samples: number;
+    target: number;
+    settled: boolean;
+    quality: Quality;
+    settleBytes: number;
+  } {
     const i = this.renderer.info;
-    return { calls: i.render.calls, triangles: i.render.triangles, geometries: i.memory.geometries, textures: i.memory.textures };
+    return {
+      calls: this.drawn.calls,
+      triangles: this.drawn.triangles,
+      geometries: i.memory.geometries,
+      textures: i.memory.textures,
+      samples: this.settle.count,
+      target: this.picture === 'full' ? this.settle.target : 0,
+      settled: this.isSettled && !this.dirty,
+      quality: this.picture,
+      settleBytes: this.settle.memory()
+    };
+  }
+
+  /** How the still picture is drawn: 'full' settles it into a properly lit render, 'fast' keeps the single pass. */
+  get quality(): Quality {
+    return this.picture;
+  }
+
+  setQuality(quality: Quality): void {
+    if (quality === this.picture) return;
+    this.picture = quality;
+    // Back to the fast picture now, or on to settling it.
+    this.dirty = true;
+  }
+
+  /** Settle with exactly n samples (a test harness on a software renderer wants few); null for the device's own count. */
+  setSamples(n: number | null): void {
+    this.settle.setSamples(n);
+    this.dirty = true;
+  }
+
+  /**
+   * Resolves once the picture is settled: refined to its last sample, or
+   * with quality 'fast', drawn and still. Any change in between only defers it.
+   */
+  settled(): Promise<void> {
+    // A change made since the last frame has not been drawn yet: it unsettles the picture on the next one.
+    if (this.isSettled && !this.dirty && !this.tweens.active) return Promise.resolve();
+    return new Promise((resolve) => this.waiters.push(resolve));
   }
 
   /**
@@ -1715,6 +1842,7 @@ export class Viewer {
     this.anchors = this.built.anchors;
     this.nav = new Nav(plan, this.built.toWorld);
     this.scene.add(this.built.root);
+    this.adoptFlat();
     if (this.mode !== 'plan') {
       (this.built.caps.material as THREE.Material).transparent = false;
       for (const o of this.built.furniture) o.visible = this.u.uPop.value > 0;
@@ -2550,17 +2678,158 @@ export class Viewer {
     else if (this.orbitLive && !this.pushing) this.controls.update();
     // During the push-in the walls hold the cut made for where it arrives.
     if (!this.introRunning && !this.pushing && this.stepCuts(dt)) this.dirty = true;
-    if (!this.dirty) return;
+    if (!this.dirty) {
+      this.refine(now);
+      return;
+    }
+    this.unsettle();
     // A walk flight needs a near plane small enough for the room once it gets there.
     if (this.mode !== 'walk' || this.flying) this.fitDepth(this.flying ? 0.06 : 0.5);
     this.dirty = false;
     if (this.outsideK > 0) this.stepOutside();
+    this.drawFast();
+    this.movedAt = now;
+    this.hooks.frame?.();
+  };
+
+  /** The fast picture: one pass, straight to the canvas. */
+  private drawFast(): void {
     if (this.shadowDirty) {
       this.renderer.shadowMap.needsUpdate = true;
       this.shadowDirty = false;
     }
     this.renderer.render(this.scene, this.camera);
-    this.hooks.frame?.();
+    this.noteDrawn();
+  }
+
+  private noteDrawn(): void {
+    const r = this.renderer.info.render;
+    this.drawn.calls = r.calls;
+    this.drawn.triangles = r.triangles;
+  }
+
+  /**
+   * A frame with nothing moving: after a short pause, the still picture is
+   * drawn once more and kept to blend from, then one settled sample is added
+   * per frame until there are enough. Then nothing is drawn at all.
+   */
+  private refine(now: number): void {
+    if (this.isSettled) {
+      // Asked for while a change was waiting to be drawn, and none came of it.
+      if (this.waiters.length) this.flushWaiters();
+      return;
+    }
+    if (document.hidden) return;
+    if (this.picture === 'fast') {
+      this.markSettled();
+      return;
+    }
+    if (now - this.movedAt < SETTLE_DELAY) return;
+    const s = this.settle;
+    // The dome's shaders compile in the background the first time; until then the fast picture stands.
+    if (!s.ready) {
+      s.prepare(this.scene, this.camera);
+      return;
+    }
+    if (!s.busy) {
+      this.drawFast();
+      s.begin();
+      return;
+    }
+    s.note(now);
+    this.drawSample();
+    if (s.done) {
+      this.restoreSun();
+      this.markSettled();
+    }
+  }
+
+  /**
+   * One settled sample: the sun moved within its disc, the dome's shadow map
+   * drawn for a direction in its cone, the camera moved by a fraction of a
+   * pixel; the real occlusion standing in for the baked contact shading for
+   * this one draw; then added to the mean and shown.
+   */
+  private drawSample(): void {
+    const s = this.settle;
+    const k = s.count + 1;
+    const lights = s.lights(k, this.sunDir(), this.sampleLights);
+    // Below the horizon the sun gives no light, and its map need not be drawn again.
+    if (this.sunLight.intensity > 0) {
+      this.fitShadow(lights.sun, true);
+      this.renderer.shadowMap.needsUpdate = true;
+    }
+    const bounds = this.domeBounds();
+    s.renderDome(this.scene, lights.dome, bounds.pts, bounds.reach);
+    // The site's baked contact shading gives way only where the dome's map covers the site: on the stage, not out of a window.
+    const site = this.site && this.siteW > 0.5 ? this.site : null;
+    const contact = site ? site.u.uContact.value : 0;
+    this.u.uBaked.value = 0;
+    if (site) site.u.uContact.value = 0;
+    s.useDome(true);
+    s.draw(this.scene, this.camera, k);
+    this.u.uBaked.value = 1;
+    if (site) site.u.uContact.value = contact;
+    this.noteDrawn();
+    s.accumulate();
+    s.show();
+  }
+
+  /** What the dome's shadow map is fitted round, world: the flat, or on the stage the site; and the tallest thing in it. */
+  private domeBounds(): { pts: THREE.Vector3[]; reach: number } {
+    const pts: THREE.Vector3[] = [];
+    const site = this.site && this.siteW > 0.5 ? this.site : null;
+    if (site) {
+      for (const x of [-site.radius, site.radius]) for (const y of [0, site.peak]) for (const z of [-site.radius, site.radius]) pts.push(this.sitePoint(x, z, y));
+      return { pts, reach: site.peak };
+    }
+    const b = this.built.box;
+    for (const x of [b.min.x - 0.3, b.max.x + 0.3]) for (const y of [-this.built.base, b.max.y + 0.1]) for (const z of [b.min.z - 0.3, b.max.z + 0.3]) pts.push(new THREE.Vector3(x, y, z));
+    return { pts, reach: this.built.height + this.built.base };
+  }
+
+  /** Something changed: back to the fast picture, with the true sun. */
+  private unsettle(): void {
+    const s = this.settle;
+    if (s.busy || s.done) {
+      s.reset();
+      this.restoreSun();
+    }
+    s.useDome(false);
+    this.isSettled = false;
+  }
+
+  /** The sun back on its true direction after the samples moved it about, drawn again with the next frame. */
+  private restoreSun(): void {
+    this.fitShadow(this.sunDir());
+    this.shadowDirty = true;
+  }
+
+  private markSettled(): void {
+    if (this.isSettled) return;
+    this.isSettled = true;
+    this.flushWaiters();
+    this.hooks.settled?.();
+  }
+
+  private flushWaiters(): void {
+    for (const f of this.waiters.splice(0)) f();
+  }
+
+  private onContextLost = (): void => {
+    this.settle.reset();
+    this.isSettled = false;
+  };
+
+  /** Every buffer comes back empty: the shadow maps and the picture are all drawn again. */
+  private onContextRestored = (): void => {
+    this.settle.restored();
+    this.shadowDirty = this.siteShadowDirty = this.dirty = true;
+  };
+
+  /** The browser stops the frames of a hidden tab; the settle's frame timing must not count the gap. */
+  private onVisibility = (): void => {
+    if (document.hidden) this.settle.pause();
   };
 
   dispose(): void {
@@ -2574,11 +2843,18 @@ export class Viewer {
     window.removeEventListener('pointerdown', this.onDownFirst, { capture: true });
     window.removeEventListener('keydown', this.onKey);
     window.removeEventListener('keyup', this.onKeyUp);
+    this.canvas.removeEventListener('webglcontextlost', this.onContextLost);
+    this.canvas.removeEventListener('webglcontextrestored', this.onContextRestored);
+    document.removeEventListener('visibilitychange', this.onVisibility);
+    this.dprQuery?.removeEventListener('change', this.onDpr);
     this.controls.dispose();
     this.dropSite();
     this.setUnit(null);
     this.built.dispose();
     this.outdoors.dispose();
+    this.settle.dispose();
     this.renderer.dispose();
+    // Nothing more will be drawn; whoever waits for the picture to settle is let go.
+    this.flushWaiters();
   }
 }
